@@ -16,7 +16,72 @@ struct ContentView: View {
     var body: some View { Group { profileComplete ? AnyView(appTabs) : AnyView(onboarding) }.frame(maxWidth: .infinity, maxHeight: .infinity).tint(.blue).fullScreenCover(item: $selectedEvent) { EventDetail(event: $0, currentName: name, currentRole: role ?? .athlete, onResponse: respond) }.fullScreenCover(isPresented: $newEvent) { NewEventView { events.append($0) } }.fullScreenCover(isPresented: $newMessage) { NewMessageView { messages.insert($0, at: 0) } }.fullScreenCover(isPresented: $thankYou) { ThankYouLetter(name: name) } }
     var onboarding: some View { NavigationStack { ScrollView { VStack(alignment: .leading, spacing: 22) { Image(systemName: "medal.fill").font(.system(size: 48)).foregroundStyle(.yellow); Text("Every athlete. Every volunteer. Every moment matters.").font(.title2.bold()); Text("Create your profile to connect with your team and receive updates.").foregroundStyle(.secondary); role == nil ? AnyView(rolePicker) : AnyView(profileForm) }.padding() }.navigationTitle("Welcome") } }
     var rolePicker: some View { VStack(alignment: .leading, spacing: 12) { Text("I am joining as...").font(.headline); ForEach(MemberRole.allCases) { choice in Button { role = choice } label: { HStack { Image(systemName: choice.icon).font(.title2); Text(choice.rawValue).font(.headline); Spacer(); Image(systemName: "chevron.right") }.padding().background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 16)) }.buttonStyle(.plain) } } }
-    var profileForm: some View { VStack(alignment: .leading, spacing: 16) { Label("Joining as \(role?.rawValue ?? "")", systemImage: role?.icon ?? "person").font(.headline).foregroundStyle(.blue); TextField("Your name", text: $name).textContentType(.name).textFieldStyle(.roundedBorder); TextField("Your age", text: $age).textFieldStyle(.roundedBorder); TextField("Email or phone number for updates", text: $contact).textContentType(.emailAddress).textFieldStyle(.roundedBorder); if role == .volunteer { TextField("Company or school (optional)", text: $organization).textFieldStyle(.roundedBorder) }; if role == .athlete { Text("Select all sports that apply").font(.headline); SportChips(sports: sports, selection: $selectedSports) }; Button("Create profile") { profileComplete = true }.buttonStyle(.borderedProminent).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || age.isEmpty || contact.isEmpty); Button("Choose a different role") { role = nil }.font(.footnote) } }
+    var profileReady: Bool { nameIssue == nil && ageIssue == nil && contactIssue == nil && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !age.isEmpty && !contact.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var nameIssue: String? { fieldIssue(for: .name, value: name) }
+    var ageIssue: String? { fieldIssue(for: .age, value: age) }
+    var contactIssue: String? { fieldIssue(for: .contact, value: contact) }
+    var profileForm: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Joining as \(role?.rawValue ?? "")", systemImage: role?.icon ?? "person").font(.headline).foregroundStyle(.blue)
+            profileField("Your name", text: $name, issue: nameIssue, contentType: .name)
+            profileField("Your age", text: $age, issue: ageIssue, keyboard: .numberPad)
+            profileField("Email or phone number for updates", text: $contact, issue: contactIssue, contentType: .emailAddress, keyboard: .emailAddress)
+            if role == .volunteer { TextField("Company or school (optional)", text: $organization).textFieldStyle(.roundedBorder) }
+            if role == .athlete { Text("Select all sports that apply").font(.headline); SportChips(sports: sports, selection: $selectedSports) }
+            Button("Create profile") { if profileReady { profileComplete = true } }.buttonStyle(.borderedProminent).disabled(!profileReady)
+            Button("Choose a different role") { role = nil }.font(.footnote)
+        }
+    }
+    func profileField(_ title: String, text: Binding<String>, issue: String?, contentType: UITextContentType? = nil, keyboard: UIKeyboardType = .default) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextField(title, text: text).textContentType(contentType).keyboardType(keyboard).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+            if let issue { Text(issue).font(.caption).foregroundStyle(.red) }
+        }
+    }
+    enum ProfileField { case name, age, contact }
+    func fieldIssue(for field: ProfileField, value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        switch field {
+        case .name:
+            if trimmed.contains("@") { return "Enter your name, not an email." }
+            if trimmed.allSatisfy({ $0.isNumber || $0 == " " }) { return "Enter your name, not an age." }
+            if trimmed.contains(where: \.isNumber) { return "Enter your name, not a number." }
+            return trimmed.range(of: #"^[\p{L}][\p{L} .'\-]*$"#, options: .regularExpression) == nil ? "Use letters for your name." : nil
+        case .age:
+            if trimmed.contains("@") { return "Enter your age, not an email." }
+            if trimmed.contains(where: \.isLetter) { return "Enter your age, not a name." }
+            guard trimmed.allSatisfy(\.isNumber), let years = Int(trimmed) else { return "Enter your full age as a number." }
+            guard (1...1000).contains(years) else { return "Enter an age from 1 to 1,000." }
+            return nil
+        case .contact:
+            if isEmail(trimmed) || isPhone(trimmed) { return nil }
+            let digits = trimmed.filter(\.isNumber)
+            let hasLetter = trimmed.contains(where: \.isLetter)
+            if trimmed.contains("@") { return "Enter a full email, like name123@email.com." }
+            if !hasLetter, let years = Int(digits), digits.count <= 4, (1...1000).contains(years) { return "Enter a full phone number or email, not an age." }
+            if hasLetter, digits.isEmpty { return "Enter a full email or phone number, not a name." }
+            return "Enter a full email or phone number."
+        }
+    }
+    func isEmail(_ value: String) -> Bool {
+        let parts = value.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        let local = String(parts[0])
+        let domain = String(parts[1])
+        let labels = domain.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard labels.count >= 2, let tld = labels.last, tld.count >= 2, tld.allSatisfy(\.isLetter) else { return false }
+        let localOK = local.contains(where: { $0.isLetter || $0.isNumber }) && local.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.union(.init(charactersIn: "._%+-")).contains($0) }
+        let domainOK = labels.dropLast().allSatisfy { label in
+            label.count >= 2 && label.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.union(.init(charactersIn: "-")).contains($0) }
+        }
+        return localOK && domainOK
+    }
+    func isPhone(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "0123456789+()- .")
+        let digits = value.filter(\.isNumber)
+        return value.unicodeScalars.allSatisfy { allowed.contains($0) } && (10...15).contains(digits.count)
+    }
     var appTabs: some View { TabView(selection: $tab) { NavigationStack { eventsPage }.tabItem { Label("Events", systemImage: "calendar.badge.clock") }.tag(0); NavigationStack { calendarPage }.tabItem { Label("Calendar", systemImage: "calendar") }.tag(1); NavigationStack { communityPage }.tabItem { Label("Community", systemImage: "megaphone.fill") }.tag(2); NavigationStack { profilePage }.tabItem { Label("Profile", systemImage: "person.crop.circle") }.tag(3) } }
     var header: some View { HStack(spacing: 12) { Image(systemName: role?.icon ?? "person").font(.title2).foregroundStyle(.blue); VStack(alignment: .leading) { Text("Hi, \(name)").font(.headline); Text(role?.rawValue ?? "").foregroundStyle(.secondary) } } }
     var eventsPage: some View { List { Section { header }; Section("Upcoming events") { ForEach(events.sorted { $0.date < $1.date }) { event in Button { selectedEvent = event } label: { EventRow(event: event) }.buttonStyle(.plain) } }; if role == .volunteer { Section { Button { thankYou = true } label: { Label("Read your latest thank-you letter", systemImage: "envelope.open.fill") } } } }.navigationTitle("Special Olympics").toolbar { if role == .admin { ToolbarItem(placement: .automatic) { Button { newEvent = true } label: { Label("Post event", systemImage: "plus") } } } } }
