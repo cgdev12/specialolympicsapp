@@ -3,6 +3,6 @@ import SwiftUI
 @main
 struct SpecialOlympicsApp: App {
     var body: some Scene {
-        WindowGroup { ContentView() }
+        WindowGroup { ContentView().frame(maxWidth: .infinity, maxHeight: .infinity) }
     }
 }
