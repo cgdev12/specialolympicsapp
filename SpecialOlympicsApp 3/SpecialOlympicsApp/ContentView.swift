@@ -350,8 +350,10 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(upcoming) { event in
-                            Button { selectedEvent = event } label: { EventRow(event: event) }
-                                .buttonStyle(.plain)
+                            Button { selectedEvent = event } label: {
+                                EventRow(event: event, declinedNames: model.people(ids: event.declinedIDs).map(\.name))
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     if model.canEditStats {
@@ -418,8 +420,10 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     ForEach(upcoming) { event in
-                        Button { selectedEvent = event } label: { EventRow(event: event) }
-                            .buttonStyle(.plain)
+                        Button { selectedEvent = event } label: {
+                            EventRow(event: event, declinedNames: model.people(ids: event.declinedIDs).map(\.name))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding()
@@ -622,11 +626,12 @@ struct ContentView: View {
 
 struct GroupTabs: View {
     @Binding var selection: EventGroup
+    var groups: [EventGroup] = EventGroup.allCases
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(EventGroup.allCases) { group in
+                ForEach(groups) { group in
                     Button(group.rawValue) { selection = group }
                         .buttonStyle(.plain)
                         .padding(.horizontal, 12)
@@ -663,6 +668,7 @@ struct SportChips: View {
 
 struct EventRow: View {
     let event: Event
+    var declinedNames: [String] = []
 
     var body: some View {
         HStack(alignment: .top) {
@@ -678,6 +684,11 @@ struct EventRow: View {
                 Label(reminderPhrase(event.reminderMinutes, sport: event.sport), systemImage: "bell.fill")
                     .font(.caption)
                     .foregroundStyle(.blue)
+                if !declinedNames.isEmpty {
+                    Label("Can’t make it: \(declinedNames.joined(separator: ", "))", systemImage: "xmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Text("\(event.attendeeIDs.count)")
@@ -708,26 +719,9 @@ struct EventDetail: View {
                             Label(reminderPhrase(event.reminderMinutes, sport: event.sport), systemImage: "bell.fill")
                         }
                         Section("Are you coming?") {
-                            HStack(spacing: 12) {
-                                RSVPChoiceButton(
-                                    title: "Yes",
-                                    subtitle: "I am coming",
-                                    icon: "checkmark.circle.fill",
-                                    selected: model.response(for: event.id) == .coming
-                                ) {
-                                    model.setComing(true, eventID: event.id)
-                                }
-                                RSVPChoiceButton(
-                                    title: "No",
-                                    subtitle: "I can’t make it",
-                                    icon: "xmark.circle.fill",
-                                    selected: model.response(for: event.id) == .notComing
-                                ) {
-                                    model.setComing(false, eventID: event.id)
-                                }
+                            RSVPChoice(response: model.response(for: event.id)) { coming in
+                                model.setComing(coming, eventID: event.id)
                             }
-                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                            .listRowBackground(Color.clear)
                         }
                         Section("Attendance") {
                             HStack {
@@ -735,29 +729,57 @@ struct EventDetail: View {
                                 StatBadge(count: model.people(ids: event.attendeeIDs, role: .athlete).count, label: "Athletes", icon: "figure.run")
                                 StatBadge(count: event.declinedIDs.count, label: "Can’t make it", icon: "xmark.circle.fill")
                             }
-                            if model.currentUser?.role == .admin {
-                                AttendeeList(title: "Athletes coming", people: model.people(ids: event.attendeeIDs, role: .athlete), icon: "figure.run")
-                                AttendeeList(title: "Volunteers coming", people: model.people(ids: event.attendeeIDs, role: .volunteer), icon: "heart.fill")
-                            }
-                            AttendeeList(
-                                title: "Can’t make it",
-                                people: model.people(ids: event.declinedIDs),
-                                icon: "xmark.circle"
+                        }
+                        if model.currentUser?.role == .admin {
+                            attendanceSection(
+                                title: "Athletes coming",
+                                people: model.people(ids: event.attendeeIDs, role: .athlete),
+                                icon: "figure.run",
+                                empty: "No athletes yet"
+                            )
+                            attendanceSection(
+                                title: "Volunteers coming",
+                                people: model.people(ids: event.attendeeIDs, role: .volunteer),
+                                icon: "heart.fill",
+                                empty: "No volunteers yet"
                             )
                         }
+                        attendanceSection(
+                            title: "Can’t make it",
+                            people: model.people(ids: event.declinedIDs),
+                            icon: "xmark.circle.fill",
+                            empty: "Nobody has said they can’t make it"
+                        )
                         Section("Stat sheet") {
+                            Text(event.group.sheetNote)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                             if model.canEditStats {
                                 Button("Enter or edit the stat sheet") { showStats = true }
-                                Text("You can enter or change these numbers at any time, including for main events.")
+                                Text("You can enter or change these numbers at any time.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                            } else if let me = model.currentUser, let line = model.statLine(eventID: event.id, athleteID: me.id) {
-                                StatReadout(group: event.group, line: line)
+                            }
+                            let sheets = sheets(for: event)
+                            if sheets.isEmpty {
+                                Text(model.canEditStats
+                                     ? "No stat sheet yet. Enter one for each athlete."
+                                     : "Your coach has not entered a stat sheet for this event yet.")
+                                    .foregroundStyle(.secondary)
+                            } else if model.canEditStats {
+                                ForEach(sheets) { line in
+                                    statSheetRow(line)
+                                }
+                            } else if let me = model.currentUser, me.role == .athlete, let line = sheets.first(where: { $0.athleteID == me.id }) {
+                                statSheetRow(line)
                                 Text("Only a coach can change these numbers.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                            } else {
+                            } else if model.currentUser?.role == .athlete {
                                 Text("Your coach has not entered your stats for this event yet.")
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("A coach enters the stat sheet for each athlete.")
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -775,48 +797,69 @@ struct EventDetail: View {
             }
         }
     }
-}
 
-struct RSVPChoiceButton: View {
-    let title: String
-    let subtitle: String
-    let icon: String
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.title2)
-                Text(title).font(.headline)
-                Text(subtitle).font(.caption)
-            }
-            .frame(maxWidth: .infinity, minHeight: 88)
-            .padding(.vertical, 12)
-            .background(selected ? Color.blue : Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
-            .foregroundStyle(selected ? Color.white : Color.blue)
-        }
-        .buttonStyle(.plain)
+    private func sheets(for event: Event) -> [StatLine] {
+        model.statLines.filter { $0.eventID == event.id }
     }
-}
 
-struct AttendeeList: View {
-    let title: String
-    let people: [Person]
-    let icon: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.headline)
+    @ViewBuilder
+    private func attendanceSection(title: String, people: [Person], icon: String, empty: String) -> some View {
+        Section(title) {
             if people.isEmpty {
-                Text("No one yet").foregroundStyle(.secondary)
+                Text(empty)
+                    .foregroundStyle(.secondary)
             } else {
                 ForEach(people) { person in
-                    Label("\(person.name) · \(person.role.rawValue)", systemImage: icon)
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(person.name)
+                            Text(person.role.rawValue)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: icon)
+                    }
                 }
             }
         }
+    }
+
+    private func statSheetRow(_ line: StatLine) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(model.people.first { $0.id == line.athleteID }?.name ?? "Athlete")
+                .font(.headline)
+            StatReadout(group: line.group, line: line)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct RSVPChoice: View {
+    let response: EventResponse?
+    let choose: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            option(title: "Yes", icon: "checkmark.circle.fill", selected: response == .coming) {
+                choose(true)
+            }
+            option(title: "No", icon: "xmark.circle.fill", selected: response == .notComing) {
+                choose(false)
+            }
+        }
+    }
+
+    private func option(title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(selected ? Color.blue : Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                .foregroundStyle(selected ? Color.white : Color.blue)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1417,12 +1460,13 @@ struct StatGraph: View {
                 Text("When a coach approves a team, stats for that team show up here.")
                     .foregroundStyle(.secondary)
             } else if let group {
-                Picker("Team", selection: $group) {
-                    ForEach(groups) { item in
-                        Text(item.rawValue).tag(Optional(item))
-                    }
-                }
-                .pickerStyle(.segmented)
+                GroupTabs(
+                    selection: Binding(
+                        get: { group },
+                        set: { self.group = $0 }
+                    ),
+                    groups: groups
+                )
                 Text(group.sheetNote)
                     .font(.caption)
                     .foregroundStyle(.secondary)
