@@ -354,7 +354,7 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                         }
                     }
-                    if model.canEditStats, eventGroup.sport != nil {
+                    if model.canEditStats {
                         let all = groupedEvents(eventGroup)
                         Section("Stat sheets") {
                             Text("Enter or change stats for any event, at any time.")
@@ -708,32 +708,51 @@ struct EventDetail: View {
                             Label(reminderPhrase(event.reminderMinutes, sport: event.sport), systemImage: "bell.fill")
                         }
                         Section("Are you coming?") {
-                            Button("Yes, I am coming") { model.setComing(true, eventID: event.id) }
-                                .buttonStyle(.borderedProminent)
-                            Button("No, I can’t make it") { model.setComing(false, eventID: event.id) }
-                                .foregroundStyle(.red)
+                            HStack(spacing: 12) {
+                                RSVPChoiceButton(
+                                    title: "Yes",
+                                    subtitle: "I am coming",
+                                    icon: "checkmark.circle.fill",
+                                    selected: model.response(for: event.id) == .coming
+                                ) {
+                                    model.setComing(true, eventID: event.id)
+                                }
+                                RSVPChoiceButton(
+                                    title: "No",
+                                    subtitle: "I can’t make it",
+                                    icon: "xmark.circle.fill",
+                                    selected: model.response(for: event.id) == .notComing
+                                ) {
+                                    model.setComing(false, eventID: event.id)
+                                }
+                            }
+                            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                            .listRowBackground(Color.clear)
                         }
                         Section("Attendance") {
                             HStack {
                                 StatBadge(count: model.people(ids: event.attendeeIDs, role: .volunteer).count, label: "Volunteers", icon: "heart.fill")
                                 StatBadge(count: model.people(ids: event.attendeeIDs, role: .athlete).count, label: "Athletes", icon: "figure.run")
+                                StatBadge(count: event.declinedIDs.count, label: "Can’t make it", icon: "xmark.circle.fill")
                             }
                             if model.currentUser?.role == .admin {
                                 AttendeeList(title: "Athletes coming", people: model.people(ids: event.attendeeIDs, role: .athlete), icon: "figure.run")
                                 AttendeeList(title: "Volunteers coming", people: model.people(ids: event.attendeeIDs, role: .volunteer), icon: "heart.fill")
                             }
+                            AttendeeList(
+                                title: "Can’t make it",
+                                people: model.people(ids: event.declinedIDs),
+                                icon: "xmark.circle"
+                            )
                         }
                         Section("Stat sheet") {
-                            if event.sport == nil {
-                                Text("Main events do not use a team stat sheet.")
-                                    .foregroundStyle(.secondary)
-                            } else if model.canEditStats {
+                            if model.canEditStats {
                                 Button("Enter or edit the stat sheet") { showStats = true }
-                                Text("You can enter or change these numbers at any time.")
+                                Text("You can enter or change these numbers at any time, including for main events.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                            } else if let me = model.currentUser, let line = model.statLine(eventID: event.id, athleteID: me.id), let sport = event.sport {
-                                StatReadout(sport: sport, line: line)
+                            } else if let me = model.currentUser, let line = model.statLine(eventID: event.id, athleteID: me.id) {
+                                StatReadout(group: event.group, line: line)
                                 Text("Only a coach can change these numbers.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -758,6 +777,30 @@ struct EventDetail: View {
     }
 }
 
+struct RSVPChoiceButton: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.title2)
+                Text(title).font(.headline)
+                Text(subtitle).font(.caption)
+            }
+            .frame(maxWidth: .infinity, minHeight: 88)
+            .padding(.vertical, 12)
+            .background(selected ? Color.blue : Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+            .foregroundStyle(selected ? Color.white : Color.blue)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct AttendeeList: View {
     let title: String
     let people: [Person]
@@ -767,10 +810,10 @@ struct AttendeeList: View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.headline)
             if people.isEmpty {
-                Text("No responses yet").foregroundStyle(.secondary)
+                Text("No one yet").foregroundStyle(.secondary)
             } else {
                 ForEach(people) { person in
-                    Label(person.name, systemImage: icon)
+                    Label("\(person.name) · \(person.role.rawValue)", systemImage: icon)
                 }
             }
         }
@@ -877,11 +920,9 @@ struct NewEventView: View {
                          : "This goes on the \(group.rawValue) calendar. Approved athletes on that team get the reminder.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    if group.sport != nil {
-                        Text("You can enter or change the stat sheet for this event at any time after posting.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("You can enter or change the stat sheet for this event at any time after posting.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle(group == .main ? "Main event" : "\(group.rawValue) event")
@@ -967,10 +1008,10 @@ struct StatEntrySheet: View {
                 if !model.canEditStats {
                     Text("Only a coach can enter stats.")
                         .foregroundStyle(.secondary)
-                } else if let event, let sport = event.sport {
-                    form(event: event, sport: sport)
+                } else if let event {
+                    form(event: event, group: event.group)
                 } else {
-                    Text("This event has no team stat sheet.")
+                    Text("This event is no longer available.")
                 }
             }
             .navigationTitle("Stat sheet")
@@ -985,11 +1026,11 @@ struct StatEntrySheet: View {
         .onAppear { prepare() }
     }
 
-    private func form(event: Event, sport: Sport) -> some View {
-        let athletes = model.approvedAthletes(for: sport)
+    private func form(event: Event, group: EventGroup) -> some View {
+        let athletes = model.eligibleAthletes(for: group)
         return Form {
             Section {
-                Text(sport.sheetNote)
+                Text(group.sheetNote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(event.title)
@@ -998,7 +1039,8 @@ struct StatEntrySheet: View {
             }
             if athletes.isEmpty {
                 Section {
-                    Text("Approve an athlete for \(sport.rawValue) before entering stats.")
+                    Text(group.sport.map { "Approve an athlete for \($0.rawValue) before entering stats." }
+                         ?? "No athletes are signed up yet.")
                         .foregroundStyle(.secondary)
                 }
             } else {
@@ -1009,7 +1051,7 @@ struct StatEntrySheet: View {
                             Text(saved ? "\(athlete.name) · sheet saved" : athlete.name).tag(Optional(athlete.id))
                         }
                     }
-                    .onChange(of: athleteID) { _, _ in loadExisting(sport: sport) }
+                    .onChange(of: athleteID) { _, _ in loadExisting(group: group) }
                 }
                 Section("Numbers only") {
                     if let letterWarning {
@@ -1017,7 +1059,7 @@ struct StatEntrySheet: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
-                    ForEach(sport.kinds) { kind in
+                    ForEach(group.kinds) { kind in
                         VStack(alignment: .leading, spacing: 4) {
                             TextField(kind.label, text: numberBinding(kind.key))
                                 .keyboardType(.numberPad)
@@ -1040,15 +1082,15 @@ struct StatEntrySheet: View {
                     Button("Review these numbers") {
                         attempted = true
                         focused = false
-                        if parsed(sport) != nil { showConfirm = true }
+                        if parsed(group) != nil { showConfirm = true }
                     }
                 }
             }
         }
         .sheet(isPresented: $showConfirm) {
-            if let athleteID, let ready = parsed(sport) {
+            if let athleteID, let ready = parsed(group) {
                 NavigationStack {
-                    StatConfirmView(eventID: event.id, athleteID: athleteID, sport: sport, values: ready) {
+                    StatConfirmView(eventID: event.id, athleteID: athleteID, group: group, values: ready) {
                         dismiss()
                     }
                 }
@@ -1057,24 +1099,24 @@ struct StatEntrySheet: View {
     }
 
     private func prepare() {
-        guard let sport = event?.sport else { return }
+        guard let group = event?.group else { return }
         if values.isEmpty {
-            for kind in sport.kinds { values[kind.key] = "" }
+            for kind in group.kinds { values[kind.key] = "" }
         }
         if athleteID == nil {
-            athleteID = model.approvedAthletes(for: sport).first?.id
+            athleteID = model.eligibleAthletes(for: group).first?.id
         }
-        loadExisting(sport: sport)
+        loadExisting(group: group)
     }
 
-    private func loadExisting(sport: Sport) {
+    private func loadExisting(group: EventGroup) {
         guard let athleteID else { return }
         if let line = model.statLine(eventID: eventID, athleteID: athleteID) {
-            for kind in sport.kinds {
+            for kind in group.kinds {
                 values[kind.key] = String(line.values[kind.key] ?? 0)
             }
         } else {
-            for kind in sport.kinds { values[kind.key] = "" }
+            for kind in group.kinds { values[kind.key] = "" }
         }
         attempted = false
         letterWarning = nil
@@ -1100,9 +1142,9 @@ struct StatEntrySheet: View {
         return InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max)
     }
 
-    private func parsed(_ sport: Sport) -> [String: Int]? {
+    private func parsed(_ group: EventGroup) -> [String: Int]? {
         var result: [String: Int] = [:]
-        for kind in sport.kinds {
+        for kind in group.kinds {
             let raw = values[kind.key, default: ""]
             if InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max) != nil { return nil }
             guard let number = Int(raw) else { return nil }
@@ -1115,7 +1157,7 @@ struct StatEntrySheet: View {
 struct StatConfirmView: View {
     let eventID: UUID
     let athleteID: UUID
-    let sport: Sport
+    let group: EventGroup
     let values: [String: Int]
     let finish: () -> Void
     @EnvironmentObject private var model: AppModel
@@ -1134,7 +1176,7 @@ struct StatConfirmView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Stat sheet") {
-                ForEach(sport.kinds) { kind in
+                ForEach(group.kinds) { kind in
                     HStack {
                         Text(kind.label)
                         Spacer()
@@ -1163,11 +1205,11 @@ struct StatConfirmView: View {
 }
 
 struct StatReadout: View {
-    let sport: Sport
+    let group: EventGroup
     let line: StatLine
 
     var body: some View {
-        ForEach(sport.kinds) { kind in
+        ForEach(group.kinds) { kind in
             HStack {
                 Text(kind.label)
                 Spacer()
@@ -1219,12 +1261,12 @@ struct StatLineEditSheet: View {
     }
 
     private func form(line: StatLine) -> some View {
-        let sport = line.sport
+        let group = line.group
         return Form {
             Section {
                 Text(model.people.first { $0.id == line.athleteID }?.name ?? "Athlete").font(.headline)
                 Text(model.eventTitle(line.eventID))
-                Text(sport.sheetNote)
+                Text(group.sheetNote)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1240,7 +1282,7 @@ struct StatLineEditSheet: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
-                ForEach(sport.kinds) { kind in
+                ForEach(group.kinds) { kind in
                     VStack(alignment: .leading, spacing: 4) {
                         TextField(kind.label, text: numberBinding(kind.key))
                             .keyboardType(.numberPad)
@@ -1266,7 +1308,7 @@ struct StatLineEditSheet: View {
                 Button("Save changes") {
                     attempted = true
                     focused = false
-                    guard let ready = parsed(sport) else { return }
+                    guard let ready = parsed(group) else { return }
                     if let error = model.updateStatLine(lineID: lineID, date: date, values: ready) {
                         message = error
                     } else {
@@ -1282,7 +1324,7 @@ struct StatLineEditSheet: View {
         guard !loaded, let line else { return }
         loaded = true
         date = line.date
-        for kind in line.sport.kinds {
+        for kind in line.group.kinds {
             values[kind.key] = String(line.values[kind.key] ?? 0)
         }
     }
@@ -1307,9 +1349,9 @@ struct StatLineEditSheet: View {
         return InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max)
     }
 
-    private func parsed(_ sport: Sport) -> [String: Int]? {
+    private func parsed(_ group: EventGroup) -> [String: Int]? {
         var result: [String: Int] = [:]
-        for kind in sport.kinds {
+        for kind in group.kinds {
             let raw = values[kind.key, default: ""]
             if InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max) != nil { return nil }
             guard let number = Int(raw) else { return nil }
@@ -1353,37 +1395,40 @@ struct StatGraph: View {
     let athleteID: UUID
     let editableNote: Bool
     @EnvironmentObject private var model: AppModel
-    @State private var sport: Sport?
+    @State private var group: EventGroup?
     @State private var statKey = ""
 
     private var person: Person? { model.people.first { $0.id == athleteID } }
 
-    private var sports: [Sport] {
+    private var groups: [EventGroup] {
         guard let person else { return [] }
         if person.role == .athlete {
-            return Sport.allCases.filter { model.status(for: $0, personID: person.id) == .approved }
+            return EventGroup.allCases.filter { item in
+                guard let sport = item.sport else { return true }
+                return model.status(for: sport, personID: person.id) == .approved
+            }
         }
-        return Sport.allCases
+        return EventGroup.allCases
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if sports.isEmpty {
+            if groups.isEmpty {
                 Text("When a coach approves a team, stats for that team show up here.")
                     .foregroundStyle(.secondary)
-            } else if let sport {
-                Picker("Team", selection: $sport) {
-                    ForEach(sports) { item in
+            } else if let group {
+                Picker("Team", selection: $group) {
+                    ForEach(groups) { item in
                         Text(item.rawValue).tag(Optional(item))
                     }
                 }
                 .pickerStyle(.segmented)
-                Text(sport.sheetNote)
+                Text(group.sheetNote)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(sport.kinds) { kind in
+                        ForEach(group.kinds) { kind in
                             Button {
                                 statKey = kind.key
                             } label: {
@@ -1401,8 +1446,8 @@ struct StatGraph: View {
                         }
                     }
                 }
-                if let kind = sport.kinds.first(where: { $0.key == statKey }) {
-                    StatGraphDetail(athleteID: athleteID, sport: sport, kind: kind)
+                if let kind = group.kinds.first(where: { $0.key == statKey }) {
+                    StatGraphDetail(athleteID: athleteID, group: group, kind: kind)
                 }
                 Text(editableNote && model.canEditStats
                      ? "Tap a stat sheet entry below to change its date or numbers."
@@ -1412,20 +1457,20 @@ struct StatGraph: View {
             }
         }
         .onAppear { pickDefaults() }
-        .onChange(of: sport) { _, newSport in
-            guard let newSport else { return }
-            if !newSport.kinds.contains(where: { $0.key == statKey }) {
-                statKey = newSport.kinds.first?.key ?? ""
+        .onChange(of: group) { _, newGroup in
+            guard let newGroup else { return }
+            if !newGroup.kinds.contains(where: { $0.key == statKey }) {
+                statKey = newGroup.kinds.first?.key ?? ""
             }
         }
     }
 
     private func pickDefaults() {
-        if sport == nil || sports.contains(sport!) == false {
-            sport = sports.first
-            statKey = sports.first?.kinds.first?.key ?? ""
+        if group == nil || groups.contains(group!) == false {
+            group = groups.first
+            statKey = groups.first?.kinds.first?.key ?? ""
         } else if statKey.isEmpty {
-            statKey = sport?.kinds.first?.key ?? ""
+            statKey = group?.kinds.first?.key ?? ""
         }
     }
 
@@ -1433,19 +1478,19 @@ struct StatGraph: View {
 
 struct StatGraphDetail: View {
     let athleteID: UUID
-    let sport: Sport
+    let group: EventGroup
     let kind: StatKind
     @EnvironmentObject private var model: AppModel
     @State private var editingLine: StatLine?
 
     private var points: [PlotPoint] {
-        model.lines(for: athleteID, sport: sport).map { line in
+        model.lines(for: athleteID, group: group).map { line in
             PlotPoint(id: line.id, date: line.date, value: line.values[kind.key] ?? 0)
         }
     }
 
     private var lines: [StatLine] {
-        model.lines(for: athleteID, sport: sport)
+        model.lines(for: athleteID, group: group)
     }
 
     var body: some View {
@@ -1454,7 +1499,7 @@ struct StatGraphDetail: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if points.isEmpty {
-                Text("No \(sport.rawValue.lowercased()) stats yet. A coach adds them from the event’s stat sheet.")
+                Text("No \(group.displayName.lowercased()) stats yet. A coach adds them from the event’s stat sheet.")
                     .foregroundStyle(.secondary)
             } else {
                 chart
@@ -1464,12 +1509,12 @@ struct StatGraphDetail: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if sport == .golf && kind.key == "score" {
+                if group == .golf && kind.key == "score" {
                     Text("A lower score means fewer strokes.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if sport == .bowling && kind.key == "score" {
+                if group == .bowling && kind.key == "score" {
                     Text("A bowling score is out of 300.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1503,7 +1548,7 @@ struct StatGraphDetail: View {
                 Text(line.date.formatted(date: .abbreviated, time: .omitted))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                ForEach(sport.kinds) { item in
+                ForEach(group.kinds) { item in
                     HStack {
                         Text(item.label)
                         Spacer()

@@ -121,6 +121,15 @@ struct Event: Identifiable, Hashable {
     var sport: Sport?
     var reminderMinutes: Int
     var attendeeIDs: [UUID]
+    var declinedIDs: [UUID] = []
+
+    /// Which stat sheet this event uses. Main events use the main sheet.
+    var group: EventGroup { EventGroup(sport: sport) }
+}
+
+enum EventResponse: Equatable {
+    case coming
+    case notComing
 }
 
 struct CommunityMessage: Identifiable, Hashable {
@@ -135,7 +144,7 @@ struct StatLine: Identifiable, Hashable {
     let id: UUID
     var athleteID: UUID
     var eventID: UUID
-    var sport: Sport
+    var group: EventGroup
     var date: Date
     var values: [String: Int]
 }
@@ -170,8 +179,30 @@ enum EventGroup: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    init(sport: Sport?) {
+        self = sport.flatMap { EventGroup(rawValue: $0.rawValue) } ?? .main
+    }
+
     var sport: Sport? {
         Sport(rawValue: rawValue)
+    }
+
+    /// Name used in sentences, like "main event stats" or "Bowling stats".
+    var displayName: String {
+        sport?.rawValue ?? "Main event"
+    }
+
+    /// Every group has a stat sheet. Main events use a general sheet that works for any activity.
+    var kinds: [StatKind] {
+        sport?.kinds ?? [
+            StatKind(key: "score", label: "Score", min: 0, max: 300),
+            StatKind(key: "minutes", label: "Minutes active", min: 0, max: 300),
+            StatKind(key: "bests", label: "Personal bests", min: 0, max: 10)
+        ]
+    }
+
+    var sheetNote: String {
+        sport?.sheetNote ?? "Main event sheet: score, minutes active, and personal bests. Every athlete can have a sheet for a main event."
     }
 }
 
@@ -424,14 +455,31 @@ final class AppModel: ObservableObject {
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
         if me.role == .athlete && !canSeeEvent(events[index], person: me) { return }
         events[index].attendeeIDs.removeAll { $0 == me.id }
+        events[index].declinedIDs.removeAll { $0 == me.id }
         if coming {
             events[index].attendeeIDs.append(me.id)
             if me.role == .volunteer { showThankYou = true }
+        } else {
+            events[index].declinedIDs.append(me.id)
         }
+    }
+
+    /// What the signed-in person answered for this event, if anything.
+    func response(for eventID: UUID) -> EventResponse? {
+        guard let me = currentUser, let event = events.first(where: { $0.id == eventID }) else { return nil }
+        if event.attendeeIDs.contains(me.id) { return .coming }
+        if event.declinedIDs.contains(me.id) { return .notComing }
+        return nil
     }
 
     func approvedAthletes(for sport: Sport) -> [Person] {
         athletes.filter { status(for: sport, personID: $0.id) == .approved }
+    }
+
+    /// Athletes who can have a stat sheet in this group. Main events are open to every athlete.
+    func eligibleAthletes(for group: EventGroup) -> [Person] {
+        guard let sport = group.sport else { return athletes }
+        return approvedAthletes(for: sport)
     }
 
     func statLine(eventID: UUID, athleteID: UUID) -> StatLine? {
@@ -443,9 +491,9 @@ final class AppModel: ObservableObject {
         currentUser?.role == .admin
     }
 
-    private func cleanValues(_ values: [String: Int], sport: Sport) -> Result<[String: Int], StatError> {
+    private func cleanValues(_ values: [String: Int], group: EventGroup) -> Result<[String: Int], StatError> {
         var clean: [String: Int] = [:]
-        for kind in sport.kinds {
+        for kind in group.kinds {
             guard let number = values[kind.key] else { return .failure(StatError("Enter \(kind.label) as a number.")) }
             if let issue = InputCheck.wholeNumberIssue(String(number), label: kind.label, min: kind.min, max: kind.max) {
                 return .failure(StatError(issue))
@@ -458,23 +506,26 @@ final class AppModel: ObservableObject {
     func saveStatLine(eventID: UUID, athleteID: UUID, values: [String: Int]) -> String? {
         guard canEditStats else { return "Only a coach can enter stats." }
         guard let event = events.first(where: { $0.id == eventID }) else { return "That event is missing." }
-        guard let sport = event.sport else { return "Main events do not have a team stat sheet." }
-        guard approvedAthletes(for: sport).contains(where: { $0.id == athleteID }) else {
-            return "Approve this athlete for the team before entering stats."
+        let group = event.group
+        guard eligibleAthletes(for: group).contains(where: { $0.id == athleteID }) else {
+            if let sport = group.sport {
+                return "Approve this athlete for \(sport.rawValue) before entering stats."
+            }
+            return "This athlete is not on the roster."
         }
         let clean: [String: Int]
-        switch cleanValues(values, sport: sport) {
+        switch cleanValues(values, group: group) {
         case .success(let ok): clean = ok
         case .failure(let error): return error.message
         }
         if let index = statLines.firstIndex(where: { $0.eventID == eventID && $0.athleteID == athleteID }) {
             statLines[index].values = clean
-            statLines[index].sport = sport
+            statLines[index].group = group
         } else {
-            statLines.append(StatLine(id: UUID(), athleteID: athleteID, eventID: eventID, sport: sport, date: event.date, values: clean))
+            statLines.append(StatLine(id: UUID(), athleteID: athleteID, eventID: eventID, group: group, date: event.date, values: clean))
         }
         let athleteName = people.first { $0.id == athleteID }?.name ?? "Athlete"
-        let summary = sport.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
+        let summary = group.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
         let body = "\(athleteName), \(event.title): \(summary)"
         postNotice(personID: athleteID, title: "Your coach entered stats", body: body)
         if let adminID = sessionPersonID {
@@ -488,9 +539,9 @@ final class AppModel: ObservableObject {
     func updateStatLine(lineID: UUID, date: Date, values: [String: Int]) -> String? {
         guard canEditStats else { return "Only a coach can change stats." }
         guard let index = statLines.firstIndex(where: { $0.id == lineID }) else { return "That stat sheet is missing." }
-        let sport = statLines[index].sport
+        let group = statLines[index].group
         let clean: [String: Int]
-        switch cleanValues(values, sport: sport) {
+        switch cleanValues(values, group: group) {
         case .success(let ok): clean = ok
         case .failure(let error): return error.message
         }
@@ -498,7 +549,7 @@ final class AppModel: ObservableObject {
         statLines[index].values = clean
         let line = statLines[index]
         let athleteName = people.first { $0.id == line.athleteID }?.name ?? "Athlete"
-        let summary = sport.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
+        let summary = group.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
         let body = "\(athleteName), \(eventTitle(line.eventID)) on \(date.formatted(date: .abbreviated, time: .omitted)): \(summary)"
         postNotice(personID: line.athleteID, title: "Your coach updated stats", body: body)
         if let adminID = sessionPersonID {
@@ -508,16 +559,20 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    func lines(for athleteID: UUID, sport: Sport) -> [StatLine] {
-        statLines.filter { $0.athleteID == athleteID && $0.sport == sport }.sorted { $0.date < $1.date }
+    func lines(for athleteID: UUID, group: EventGroup) -> [StatLine] {
+        statLines.filter { $0.athleteID == athleteID && $0.group == group }.sorted { $0.date < $1.date }
     }
 
     func eventTitle(_ id: UUID) -> String {
         events.first { $0.id == id }?.title ?? "Event"
     }
 
+    func people(ids: [UUID]) -> [Person] {
+        ids.compactMap { id in people.first { $0.id == id } }
+    }
+
     func people(ids: [UUID], role: MemberRole) -> [Person] {
-        ids.compactMap { id in people.first { $0.id == id && $0.role == role } }
+        people(ids: ids).filter { $0.role == role }
     }
 
     func postNotice(personID: UUID, title: String, body: String) {
@@ -602,14 +657,17 @@ enum SeedData {
             makeEvent("Basketball vs Central", date: dayOffset(-16), location: "Northside Gym", sport: .basketball, attendees: [SeedID.sam]),
             makeEvent("Basketball vs Harbor", date: dayOffset(-9), location: "Northside Gym", sport: .basketball, attendees: [SeedID.sam])
         ]
+        let mainEvents = [
+            makeEvent("Fall kickoff picnic", date: dayOffset(-18), location: "City Park", sport: nil, attendees: [SeedID.maya, SeedID.kai, SeedID.jordan], declined: [SeedID.sam]),
+            makeEvent("Community bowling night", date: dayOffset(4), location: "Sunset Lanes", sport: nil, attendees: [SeedID.jordan], declined: [SeedID.kai])
+        ]
         let upcoming = [
-            makeEvent("Community bowling night", date: dayOffset(4), location: "Sunset Lanes", sport: nil, attendees: [SeedID.jordan]),
-            makeEvent("Floorball home game", date: dayOffset(6), location: "Ice Hall A", sport: .floorball, attendees: []),
+            makeEvent("Floorball home game", date: dayOffset(6), location: "Ice Hall A", sport: .floorball, attendees: [], declined: [SeedID.maya]),
             makeEvent("Basketball skills clinic", date: dayOffset(10), location: "Northside Gym", sport: .basketball, attendees: []),
             makeEvent("Golf skills day", date: dayOffset(-5), location: "River Greens", sport: .golf, attendees: []),
             makeEvent("Golf outing", date: dayOffset(12), location: "River Greens", sport: .golf, attendees: [])
         ]
-        let events = floorballEvents + bowlingEvents + basketballEvents + upcoming
+        let events = floorballEvents + bowlingEvents + basketballEvents + mainEvents + upcoming
 
         let kaiGoals = [1, 2, 4]
         let kaiAssists = [0, 1, 1]
@@ -620,7 +678,7 @@ enum SeedData {
                 id: UUID(),
                 athleteID: SeedID.kai,
                 eventID: floorballEvents[index].id,
-                sport: .floorball,
+                group: .floorball,
                 date: floorballEvents[index].date,
                 values: ["goals": kaiGoals[index], "assists": kaiAssists[index], "shots": kaiShots[index], "saves": 0, "penalties": index == 1 ? 2 : 0]
             ))
@@ -633,7 +691,7 @@ enum SeedData {
                 id: UUID(),
                 athleteID: SeedID.maya,
                 eventID: bowlingEvents[index].id,
-                sport: .bowling,
+                group: .bowling,
                 date: bowlingEvents[index].date,
                 values: ["score": mayaScores[index], "strikes": mayaStrikes[index], "spares": mayaSpares[index]]
             ))
@@ -645,11 +703,27 @@ enum SeedData {
                 id: UUID(),
                 athleteID: SeedID.sam,
                 eventID: basketballEvents[index].id,
-                sport: .basketball,
+                group: .basketball,
                 date: basketballEvents[index].date,
                 values: ["points": samPoints[index], "rebounds": samRebounds[index], "assists": index + 1, "steals": 1, "blocks": index]
             ))
         }
+        lines.append(StatLine(
+            id: UUID(),
+            athleteID: SeedID.maya,
+            eventID: mainEvents[0].id,
+            group: .main,
+            date: mainEvents[0].date,
+            values: ["score": 12, "minutes": 45, "bests": 1]
+        ))
+        lines.append(StatLine(
+            id: UUID(),
+            athleteID: SeedID.kai,
+            eventID: mainEvents[0].id,
+            group: .main,
+            date: mainEvents[0].date,
+            values: ["score": 9, "minutes": 40, "bests": 0]
+        ))
 
         let messages = [
             CommunityMessage(id: UUID(), title: "Welcome to the fall season!", body: "We’re excited to see everyone at the first practice. Bring water and your uniform.", date: dayOffset(-2), sport: nil),
@@ -661,8 +735,8 @@ enum SeedData {
         return (people, events, messages, lines)
     }
 
-    private static func makeEvent(_ title: String, date: Date, location: String, sport: Sport?, attendees: [UUID]) -> Event {
-        Event(id: UUID(), title: title, date: date, location: location, sport: sport, reminderMinutes: ReminderLead.hour.rawValue, attendeeIDs: attendees)
+    private static func makeEvent(_ title: String, date: Date, location: String, sport: Sport?, attendees: [UUID], declined: [UUID] = []) -> Event {
+        Event(id: UUID(), title: title, date: date, location: location, sport: sport, reminderMinutes: ReminderLead.hour.rawValue, attendeeIDs: attendees, declinedIDs: declined)
     }
 
     private static func dayOffset(_ days: Int, hour: Int = 18) -> Date {
