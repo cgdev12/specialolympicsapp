@@ -140,6 +140,11 @@ struct StatLine: Identifiable, Hashable {
     var values: [String: Int]
 }
 
+struct StatError: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+}
+
 struct Notice: Identifiable, Hashable {
     let id: UUID
     var personID: UUID
@@ -433,25 +438,37 @@ final class AppModel: ObservableObject {
         statLines.first { $0.eventID == eventID && $0.athleteID == athleteID }
     }
 
-    func saveStatLine(eventID: UUID, athleteID: UUID, values: [String: Int]) -> String? {
-        guard currentUser?.role == .admin else { return "Only a coach can enter stats." }
-        guard let event = events.first(where: { $0.id == eventID }) else { return "That event is missing." }
-        guard let sport = event.sport else { return "Main events do not have a team stat sheet." }
-        guard event.date <= Date() else { return "Enter stats after the event happens." }
-        guard approvedAthletes(for: sport).contains(where: { $0.id == athleteID }) else {
-            return "Approve this athlete for the team before entering stats."
-        }
+    /// Only the admin / head coach can add or change stat sheets.
+    var canEditStats: Bool {
+        currentUser?.role == .admin
+    }
+
+    private func cleanValues(_ values: [String: Int], sport: Sport) -> Result<[String: Int], StatError> {
         var clean: [String: Int] = [:]
         for kind in sport.kinds {
-            guard let number = values[kind.key] else { return "Enter \(kind.label) as a number." }
+            guard let number = values[kind.key] else { return .failure(StatError("Enter \(kind.label) as a number.")) }
             if let issue = InputCheck.wholeNumberIssue(String(number), label: kind.label, min: kind.min, max: kind.max) {
-                return issue
+                return .failure(StatError(issue))
             }
             clean[kind.key] = number
         }
+        return .success(clean)
+    }
+
+    func saveStatLine(eventID: UUID, athleteID: UUID, values: [String: Int]) -> String? {
+        guard canEditStats else { return "Only a coach can enter stats." }
+        guard let event = events.first(where: { $0.id == eventID }) else { return "That event is missing." }
+        guard let sport = event.sport else { return "Main events do not have a team stat sheet." }
+        guard approvedAthletes(for: sport).contains(where: { $0.id == athleteID }) else {
+            return "Approve this athlete for the team before entering stats."
+        }
+        let clean: [String: Int]
+        switch cleanValues(values, sport: sport) {
+        case .success(let ok): clean = ok
+        case .failure(let error): return error.message
+        }
         if let index = statLines.firstIndex(where: { $0.eventID == eventID && $0.athleteID == athleteID }) {
             statLines[index].values = clean
-            statLines[index].date = event.date
             statLines[index].sport = sport
         } else {
             statLines.append(StatLine(id: UUID(), athleteID: athleteID, eventID: eventID, sport: sport, date: event.date, values: clean))
@@ -464,6 +481,30 @@ final class AppModel: ObservableObject {
             postNotice(personID: adminID, title: "Stats confirmed", body: body)
         }
         notify(title: "Stats confirmed", body: body)
+        return nil
+    }
+
+    /// Lets the coach change the date or any number on a saved stat sheet, at any time.
+    func updateStatLine(lineID: UUID, date: Date, values: [String: Int]) -> String? {
+        guard canEditStats else { return "Only a coach can change stats." }
+        guard let index = statLines.firstIndex(where: { $0.id == lineID }) else { return "That stat sheet is missing." }
+        let sport = statLines[index].sport
+        let clean: [String: Int]
+        switch cleanValues(values, sport: sport) {
+        case .success(let ok): clean = ok
+        case .failure(let error): return error.message
+        }
+        statLines[index].date = date
+        statLines[index].values = clean
+        let line = statLines[index]
+        let athleteName = people.first { $0.id == line.athleteID }?.name ?? "Athlete"
+        let summary = sport.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
+        let body = "\(athleteName), \(eventTitle(line.eventID)) on \(date.formatted(date: .abbreviated, time: .omitted)): \(summary)"
+        postNotice(personID: line.athleteID, title: "Your coach updated stats", body: body)
+        if let adminID = sessionPersonID {
+            postNotice(personID: adminID, title: "Stats updated", body: body)
+        }
+        notify(title: "Stats updated", body: body)
         return nil
     }
 

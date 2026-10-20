@@ -354,14 +354,17 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                         }
                     }
-                    if model.currentUser?.role == .admin, eventGroup.sport != nil {
-                        let past = groupedEvents(eventGroup).filter { $0.date <= Date() }
-                        Section("Stat sheet after the event") {
-                            if past.isEmpty {
-                                Text("Post the event with a past date, or wait until it happens, then enter the stat sheet.")
+                    if model.canEditStats, eventGroup.sport != nil {
+                        let all = groupedEvents(eventGroup)
+                        Section("Stat sheets") {
+                            Text("Enter or change stats for any event, at any time.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            if all.isEmpty {
+                                Text("Post an event, then enter its stat sheet.")
                                     .foregroundStyle(.secondary)
                             }
-                            ForEach(past) { event in
+                            ForEach(all) { event in
                                 Button { statsEvent = event } label: {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(event.title).font(.headline)
@@ -523,7 +526,7 @@ struct ContentView: View {
                     }
                 }
                 Section("Athlete graphs") {
-                    Text("Coaches enter stats after an event. Athletes can view the graph and cannot change it.")
+                    Text("Only you can enter or change stats, and you can do it at any time. Athletes can view the graph and cannot change it.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     ForEach(model.athletes) { athlete in
@@ -553,7 +556,7 @@ struct ContentView: View {
                     }
                 }
                 Section("Your stats") {
-                    Text("Only a coach can add or change stats, after an event happens.")
+                    Text("Only a coach can add or change stats.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     StatGraph(athleteID: me.id, editableNote: false)
@@ -724,11 +727,11 @@ struct EventDetail: View {
                             if event.sport == nil {
                                 Text("Main events do not use a team stat sheet.")
                                     .foregroundStyle(.secondary)
-                            } else if event.date > Date() {
-                                Text("Stats are entered after this event happens.")
-                                    .foregroundStyle(.secondary)
-                            } else if model.currentUser?.role == .admin {
+                            } else if model.canEditStats {
                                 Button("Enter or edit the stat sheet") { showStats = true }
+                                Text("You can enter or change these numbers at any time.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             } else if let me = model.currentUser, let line = model.statLine(eventID: event.id, athleteID: me.id), let sport = event.sport {
                                 StatReadout(sport: sport, line: line)
                                 Text("Only a coach can change these numbers.")
@@ -875,7 +878,7 @@ struct NewEventView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     if group.sport != nil {
-                        Text("If this date is already past, you can enter the stat sheet right after posting.")
+                        Text("You can enter or change the stat sheet for this event at any time after posting.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -961,7 +964,10 @@ struct StatEntrySheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let event, let sport = event.sport {
+                if !model.canEditStats {
+                    Text("Only a coach can enter stats.")
+                        .foregroundStyle(.secondary)
+                } else if let event, let sport = event.sport {
                     form(event: event, sport: sport)
                 } else {
                     Text("This event has no team stat sheet.")
@@ -1172,6 +1178,147 @@ struct StatReadout: View {
     }
 }
 
+/// Coach-only editor for one saved stat sheet entry: the date and every number can change at any time.
+struct StatLineEditSheet: View {
+    let lineID: UUID
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var date = Date()
+    @State private var values: [String: String] = [:]
+    @State private var letterWarning: String?
+    @State private var attempted = false
+    @State private var message: String?
+    @State private var loaded = false
+    @FocusState private var focused: Bool
+
+    private var line: StatLine? { model.statLines.first { $0.id == lineID } }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if !model.canEditStats {
+                    Text("Only a coach can change stats.")
+                        .foregroundStyle(.secondary)
+                } else if let line {
+                    form(line: line)
+                } else {
+                    Text("This stat sheet is no longer available.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Edit stat sheet")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focused = false }
+                }
+            }
+        }
+        .onAppear { load() }
+    }
+
+    private func form(line: StatLine) -> some View {
+        let sport = line.sport
+        return Form {
+            Section {
+                Text(model.people.first { $0.id == line.athleteID }?.name ?? "Athlete").font(.headline)
+                Text(model.eventTitle(line.eventID))
+                Text(sport.sheetNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Date") {
+                DatePicker("Date", selection: $date, displayedComponents: .date)
+                Text("This moves the point on the graph. You can set any date.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Numbers only") {
+                if let letterWarning {
+                    Text(letterWarning)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                ForEach(sport.kinds) { kind in
+                    VStack(alignment: .leading, spacing: 4) {
+                        TextField(kind.label, text: numberBinding(kind.key))
+                            .keyboardType(.numberPad)
+                            .focused($focused)
+                        Text("\(kind.min)–\(kind.max)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        if let issue = liveIssue(kind) {
+                            Text(issue)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+                Text("Enter 0 if the athlete had none. Letters are not accepted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let message {
+                Section { Text(message).foregroundStyle(.red) }
+            }
+            Section {
+                Button("Save changes") {
+                    attempted = true
+                    focused = false
+                    guard let ready = parsed(sport) else { return }
+                    if let error = model.updateStatLine(lineID: lineID, date: date, values: ready) {
+                        message = error
+                    } else {
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private func load() {
+        guard !loaded, let line else { return }
+        loaded = true
+        date = line.date
+        for kind in line.sport.kinds {
+            values[kind.key] = String(line.values[kind.key] ?? 0)
+        }
+    }
+
+    private func numberBinding(_ key: String) -> Binding<String> {
+        Binding(
+            get: { values[key, default: ""] },
+            set: { newValue in
+                if newValue.contains(where: \.isLetter) {
+                    letterWarning = "Use numbers only, not letters."
+                } else {
+                    letterWarning = nil
+                }
+                values[key] = newValue.filter(\.isNumber)
+            }
+        )
+    }
+
+    private func liveIssue(_ kind: StatKind) -> String? {
+        let raw = values[kind.key, default: ""]
+        if raw.isEmpty { return attempted ? "Enter \(kind.label) as a number." : nil }
+        return InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max)
+    }
+
+    private func parsed(_ sport: Sport) -> [String: Int]? {
+        var result: [String: Int] = [:]
+        for kind in sport.kinds {
+            let raw = values[kind.key, default: ""]
+            if InputCheck.wholeNumberIssue(raw, label: kind.label, min: kind.min, max: kind.max) != nil { return nil }
+            guard let number = Int(raw) else { return nil }
+            result[kind.key] = number
+        }
+        return result
+    }
+}
+
 struct AthleteStatsPage: View {
     let athleteID: UUID
     @EnvironmentObject private var model: AppModel
@@ -1181,7 +1328,9 @@ struct AthleteStatsPage: View {
             if let athlete = model.people.first(where: { $0.id == athleteID }) {
                 Section {
                     Text(athlete.name).font(.headline)
-                    Text("Read only. Change numbers from the past event’s stat sheet.")
+                    Text(model.canEditStats
+                         ? "Tap any stat sheet entry below to change its date or numbers, at any time."
+                         : "Read only. Only a coach can change these numbers.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1255,8 +1404,8 @@ struct StatGraph: View {
                 if let kind = sport.kinds.first(where: { $0.key == statKey }) {
                     StatGraphDetail(athleteID: athleteID, sport: sport, kind: kind)
                 }
-                Text(editableNote
-                     ? "To change a number, open that past event and edit the stat sheet."
+                Text(editableNote && model.canEditStats
+                     ? "Tap a stat sheet entry below to change its date or numbers."
                      : "Only a coach can add or change these numbers.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1287,6 +1436,7 @@ struct StatGraphDetail: View {
     let sport: Sport
     let kind: StatKind
     @EnvironmentObject private var model: AppModel
+    @State private var editingLine: StatLine?
 
     private var points: [PlotPoint] {
         model.lines(for: athleteID, sport: sport).map { line in
@@ -1304,7 +1454,7 @@ struct StatGraphDetail: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if points.isEmpty {
-                Text("No \(sport.rawValue.lowercased()) stats yet. A coach adds them after each event.")
+                Text("No \(sport.rawValue.lowercased()) stats yet. A coach adds them from the event’s stat sheet.")
                     .foregroundStyle(.secondary)
             } else {
                 chart
@@ -1330,25 +1480,52 @@ struct StatGraphDetail: View {
                     .font(.headline)
                     .padding(.top, 4)
                 ForEach(lines) { line in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.eventTitle(line.eventID)).font(.subheadline.bold())
-                        Text(line.date.formatted(date: .abbreviated, time: .omitted))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ForEach(sport.kinds) { item in
-                            HStack {
-                                Text(item.label)
-                                Spacer()
-                                Text("\(line.values[item.key] ?? 0)")
-                                    .monospacedDigit()
-                            }
-                            .font(.subheadline)
+                    if model.canEditStats {
+                        Button { editingLine = line } label: {
+                            sheetRow(line, editable: true)
                         }
+                        .buttonStyle(.plain)
+                    } else {
+                        sheetRow(line, editable: false)
                     }
-                    .padding(.vertical, 4)
                 }
             }
         }
+        .sheet(item: $editingLine) { line in
+            StatLineEditSheet(lineID: line.id)
+        }
+    }
+
+    private func sheetRow(_ line: StatLine, editable: Bool) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.eventTitle(line.eventID)).font(.subheadline.bold())
+                Text(line.date.formatted(date: .abbreviated, time: .omitted))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(sport.kinds) { item in
+                    HStack {
+                        Text(item.label)
+                        Spacer()
+                        Text("\(line.values[item.key] ?? 0)")
+                            .monospacedDigit()
+                    }
+                    .font(.subheadline)
+                }
+                if editable {
+                    Text("Tap to change the date or numbers")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+            }
+            if editable {
+                Image(systemName: "pencil.circle.fill")
+                    .foregroundStyle(.blue)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 
     private var chart: some View {
