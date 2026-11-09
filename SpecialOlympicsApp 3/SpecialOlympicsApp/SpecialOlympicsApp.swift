@@ -11,7 +11,7 @@ struct SpecialOlympicsApp: App {
                 if authentication.currentUser == nil {
                     SignInView()
                 } else {
-                    ContentView()
+                    ContentView(initialRole: authentication.onboardingRole)
                         .environmentObject(model)
                 }
             }

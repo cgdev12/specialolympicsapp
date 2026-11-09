@@ -29,6 +29,10 @@ struct ContentView: View {
     @State private var showNewEvent = false
     @State private var showNewMessage = false
 
+    init(initialRole: MemberRole? = nil) {
+        _role = State(initialValue: initialRole)
+    }
+
     var body: some View {
         Group {
             if model.currentUser == nil {
