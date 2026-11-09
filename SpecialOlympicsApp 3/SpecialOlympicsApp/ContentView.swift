@@ -37,7 +37,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             if model.currentUser == nil {
-                onboarding
+                missingProfile
             } else {
                 appTabs
             }
@@ -103,6 +103,22 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("Welcome")
+        }
+    }
+
+    private var missingProfile: some View {
+        ContentUnavailableView {
+            Label("Profile unavailable", systemImage: "person.crop.circle.badge.exclamationmark")
+        } description: {
+            Text("This signed-in account does not have a saved 212so profile on this device.")
+        } actions: {
+            Button("Sign out of 212so") {
+                Task {
+                    await authentication.signOut()
+                    model.signOut()
+                }
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 

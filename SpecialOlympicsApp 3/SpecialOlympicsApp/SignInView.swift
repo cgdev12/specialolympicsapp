@@ -1,5 +1,28 @@
 import SwiftUI
 
+private enum SignupRole: String, CaseIterable, Identifiable {
+    case athlete = "Athlete"
+    case volunteer = "Volunteer"
+    case headCoach = "Head Coach (approval required)"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .athlete: "figure.run"
+        case .volunteer: "heart.fill"
+        case .headCoach: "person.badge.key.fill"
+        }
+    }
+
+    var memberRole: MemberRole {
+        switch self {
+        case .athlete: .athlete
+        case .volunteer, .headCoach: .volunteer
+        }
+    }
+}
+
 struct SignInView: View {
     enum Mode { case signIn, signUp, verify, resetRequest, resetConfirm }
 
@@ -10,7 +33,7 @@ struct SignInView: View {
     @State private var password = ""
     @State private var newPassword = ""
     @State private var verificationCode = ""
-    @State private var selectedRole: MemberRole = .athlete
+    @State private var selectedRole: SignupRole = .athlete
     @State private var name = ""
     @State private var age = ""
     @State private var phone = ""
@@ -42,11 +65,16 @@ struct SignInView: View {
                 if mode == .signUp {
                     Section("How will you use 212so?") {
                         Picker("Role", selection: $selectedRole) {
-                            ForEach(MemberRole.allCases) { role in
-                                Label(role == .admin ? "Head Coach" : role.rawValue, systemImage: role.icon).tag(role)
+                            ForEach(SignupRole.allCases) { role in
+                                Label(role.rawValue, systemImage: role.icon).tag(role)
                             }
                         }
                         .pickerStyle(.navigationLink)
+                        if selectedRole == .headCoach {
+                            Text("Head Coach controls are enabled only after a current Head Coach approves the account.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Section("Your profile") {
                         TextField("Full name", text: $name)
@@ -56,7 +84,7 @@ struct SignInView: View {
                             .keyboardType(.phonePad)
                         TextField("Age", text: $age)
                             .keyboardType(.numberPad)
-                        if selectedRole == .volunteer {
+                        if selectedRole == .volunteer || selectedRole == .headCoach {
                             TextField("Company or school (optional)", text: $organization)
                         }
                     }
@@ -147,11 +175,12 @@ struct SignInView: View {
                     try await authentication.signIn(email: email, password: password)
                     guard let years = Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
                     let profile = Authentication.OnboardingProfile(
-                        role: selectedRole,
+                        role: selectedRole.memberRole,
                         name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                         age: years,
                         phone: phone.trimmingCharacters(in: .whitespacesAndNewlines),
-                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines)
+                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
+                        requestedHeadCoach: selectedRole == .headCoach
                     )
                     authentication.saveOnboardingProfile(profile, for: email)
                     model.completeSignup(

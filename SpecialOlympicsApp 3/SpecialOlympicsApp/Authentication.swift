@@ -14,6 +14,10 @@ final class Authentication: ObservableObject {
         let age: Int
         let phone: String
         let organization: String
+        /// Head Coach access cannot be granted by the public sign-up endpoint.
+        /// It remains a request until an authorized backend approval changes
+        /// the account role to `.admin`.
+        let requestedHeadCoach: Bool?
     }
 
     enum AuthenticationError: LocalizedError {
@@ -100,8 +104,16 @@ final class Authentication: ObservableObject {
 
     func signOut() async {
         _ = try? await submit("/logout", fields: [:])
+        clearSessionCookies()
         currentUser = nil
         onboardingRole = nil
+    }
+
+    private func clearSessionCookies() {
+        guard let host = baseURL.host else { return }
+        for cookie in session.configuration.httpCookieStorage?.cookies ?? [] where cookie.domain.contains(host) {
+            session.configuration.httpCookieStorage?.deleteCookie(cookie)
+        }
     }
 
     private func roleKey(for email: String) -> String {
