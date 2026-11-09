@@ -24,7 +24,7 @@ private enum SignupRole: String, CaseIterable, Identifiable {
 }
 
 struct SignInView: View {
-    enum Mode { case signIn, signUp, verify, resetRequest, resetConfirm }
+    enum Mode { case signIn, signUp, verify, resetRequest, resetConfirm, profileSetup }
 
     @EnvironmentObject private var authentication: Authentication
     @EnvironmentObject private var model: AppModel
@@ -39,6 +39,10 @@ struct SignInView: View {
     @State private var phone = ""
     @State private var organization = ""
     @State private var errorMessage: String?
+
+    init(profileSetup: Bool = false) {
+        _mode = State(initialValue: profileSetup ? .profileSetup : .signIn)
+    }
 
     var body: some View {
         NavigationStack {
@@ -62,7 +66,7 @@ struct SignInView: View {
                         }
                     }
                 }
-                if mode == .signUp {
+                if mode == .signUp || mode == .profileSetup {
                     Section("How will you use 212so?") {
                         Picker("Role", selection: $selectedRole) {
                             ForEach(SignupRole.allCases) { role in
@@ -107,8 +111,12 @@ struct SignInView: View {
                     if mode == .signIn {
                         Button("Create an account") { mode = .signUp; errorMessage = nil }
                         Button("Forgot password?") { mode = .resetRequest; errorMessage = nil }
-                    } else {
+                    } else if mode != .profileSetup {
                         Button("Back to sign in") { mode = .signIn; errorMessage = nil }
+                    } else {
+                        Button("Use a different 212so account") {
+                            Task { await authentication.signOut() }
+                        }
                     }
                 }
             }
@@ -124,6 +132,7 @@ struct SignInView: View {
         case .verify: "Verify account"
         case .resetRequest: "Send reset code"
         case .resetConfirm: "Reset password"
+        case .profileSetup: "Save profile"
         }
     }
 
@@ -134,6 +143,7 @@ struct SignInView: View {
         case .verify: "Check your email"
         case .resetRequest: "Reset your password"
         case .resetConfirm: "Choose a new password"
+        case .profileSetup: "Update your profile"
         }
     }
 
@@ -144,6 +154,7 @@ struct SignInView: View {
         case .verify: "Enter the verification code sent to \(email)."
         case .resetRequest: "We’ll email a code to reset your password."
         case .resetConfirm: "Enter the reset code sent to \(email)."
+        case .profileSetup: "Your 212so account is already verified. Update the role and phone number linked to this app."
         }
     }
 
@@ -152,7 +163,7 @@ struct SignInView: View {
         case .verify: !verificationCode.isEmpty
         case .resetConfirm: !verificationCode.isEmpty && newPassword.count >= 8
         case .signIn: email.contains("@") && password.count >= 8
-        case .signUp:
+        case .signUp, .profileSetup:
             email.contains("@") && password.count >= 8 &&
             !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) != nil &&
@@ -200,6 +211,26 @@ struct SignInView: View {
                     try await authentication.confirmPasswordReset(email: email, code: verificationCode, newPassword: newPassword)
                     password = newPassword
                     mode = .signIn
+                case .profileSetup:
+                    guard let email = authentication.currentUser?.email,
+                          let years = Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+                    let profile = Authentication.OnboardingProfile(
+                        role: selectedRole.memberRole,
+                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                        age: years,
+                        phone: phone.trimmingCharacters(in: .whitespacesAndNewlines),
+                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
+                        requestedHeadCoach: selectedRole == .headCoach
+                    )
+                    authentication.saveOnboardingProfile(profile, for: email)
+                    model.completeSignup(
+                        role: profile.role,
+                        name: profile.name,
+                        age: profile.age,
+                        contact: profile.phone,
+                        organization: profile.organization,
+                        sports: []
+                    )
                 }
             } catch { errorMessage = error.localizedDescription }
         }

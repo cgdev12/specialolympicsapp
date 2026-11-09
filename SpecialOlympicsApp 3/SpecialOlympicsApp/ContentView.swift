@@ -604,6 +604,16 @@ struct ContentView: View {
                     }
                 }
             }
+            Section("Account") {
+                Button("Reset app profile", role: .destructive) {
+                    guard let email = authentication.currentUser?.email else { return }
+                    authentication.resetOnboardingProfile(for: email)
+                    model.signOut()
+                }
+                Text("This keeps your verified 212so email account, but lets you redo your role, phone number, and profile details.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle("Profile")
         .toolbar {
@@ -612,7 +622,6 @@ struct ContentView: View {
                     Task {
                         await authentication.signOut()
                         model.signOut()
-                        resetJoinForm()
                     }
                 }
             }

@@ -90,6 +90,15 @@ final class Authentication: ObservableObject {
         return try? JSONDecoder().decode(OnboardingProfile.self, from: data)
     }
 
+    /// Removes only the profile stored on this device. The real 212so account
+    /// and its active session remain intact so the user can immediately enter
+    /// corrected role and contact information.
+    func resetOnboardingProfile(for email: String) {
+        UserDefaults.standard.removeObject(forKey: profileKey(for: email))
+        UserDefaults.standard.removeObject(forKey: roleKey(for: email))
+        onboardingRole = nil
+    }
+
     func requestPasswordReset(email: String) async throws {
         try await submit("/reset_password", fields: ["email": email.trimmed])
     }

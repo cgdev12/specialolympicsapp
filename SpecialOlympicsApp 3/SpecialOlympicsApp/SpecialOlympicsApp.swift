@@ -10,8 +10,11 @@ struct SpecialOlympicsApp: App {
             Group {
                 if authentication.currentUser == nil {
                     SignInView()
+                } else if let email = authentication.currentUser?.email,
+                          authentication.savedOnboardingProfile(for: email) == nil {
+                    SignInView(profileSetup: true)
                 } else {
-                    ContentView(initialRole: authentication.onboardingRole)
+                    ContentView()
                         .environmentObject(model)
                 }
             }
