@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import UserNotifications
 
-enum MemberRole: String, CaseIterable, Identifiable, Hashable {
+enum MemberRole: String, CaseIterable, Identifiable, Hashable, Codable {
     case athlete = "Athlete"
     case volunteer = "Volunteer"
     case admin = "Admin / Head Coach"

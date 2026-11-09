@@ -10,6 +10,7 @@ private enum JoinStep {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var authentication: Authentication
     @State private var role: MemberRole?
     @State private var name = ""
     @State private var age = ""
@@ -592,8 +593,11 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button("Sign out") {
-                    model.signOut()
-                    resetJoinForm()
+                    Task {
+                        await authentication.signOut()
+                        model.signOut()
+                        resetJoinForm()
+                    }
                 }
             }
         }

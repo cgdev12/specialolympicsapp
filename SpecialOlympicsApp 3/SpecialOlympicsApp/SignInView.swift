@@ -4,12 +4,17 @@ struct SignInView: View {
     enum Mode { case signIn, signUp, verify, resetRequest, resetConfirm }
 
     @EnvironmentObject private var authentication: Authentication
+    @EnvironmentObject private var model: AppModel
     @State private var mode: Mode = .signIn
     @State private var email = ""
     @State private var password = ""
     @State private var newPassword = ""
     @State private var verificationCode = ""
     @State private var selectedRole: MemberRole = .athlete
+    @State private var name = ""
+    @State private var age = ""
+    @State private var phone = ""
+    @State private var organization = ""
     @State private var errorMessage: String?
 
     var body: some View {
@@ -37,11 +42,23 @@ struct SignInView: View {
                 if mode == .signUp {
                     Section("How will you use 212so?") {
                         Picker("Role", selection: $selectedRole) {
-                            ForEach(MemberRole.allCases.filter { $0 != .admin }) { role in
-                                Label(role.rawValue, systemImage: role.icon).tag(role)
+                            ForEach(MemberRole.allCases) { role in
+                                Label(role == .admin ? "Head Coach" : role.rawValue, systemImage: role.icon).tag(role)
                             }
                         }
                         .pickerStyle(.navigationLink)
+                    }
+                    Section("Your profile") {
+                        TextField("Full name", text: $name)
+                            .textContentType(.name)
+                        TextField("Phone number", text: $phone)
+                            .textContentType(.telephoneNumber)
+                            .keyboardType(.phonePad)
+                        TextField("Age", text: $age)
+                            .keyboardType(.numberPad)
+                        if selectedRole == .volunteer {
+                            TextField("Company or school (optional)", text: $organization)
+                        }
                     }
                 }
                 if mode == .verify || mode == .resetConfirm {
@@ -75,7 +92,7 @@ struct SignInView: View {
     private var mainButtonTitle: String {
         switch mode {
         case .signIn: "Sign in"
-        case .signUp: "Create account"
+        case .signUp: "Send verification code"
         case .verify: "Verify account"
         case .resetRequest: "Send reset code"
         case .resetConfirm: "Reset password"
@@ -95,7 +112,7 @@ struct SignInView: View {
     private var subtitle: String {
         switch mode {
         case .signIn: "Sign in to 212so to continue."
-        case .signUp: "Choose your role now, then finish your profile in onboarding."
+        case .signUp: "Choose your role and enter your phone number once. There is no second sign-in."
         case .verify: "Enter the verification code sent to \(email)."
         case .resetRequest: "We’ll email a code to reset your password."
         case .resetConfirm: "Enter the reset code sent to \(email)."
@@ -106,7 +123,12 @@ struct SignInView: View {
         switch mode {
         case .verify: !verificationCode.isEmpty
         case .resetConfirm: !verificationCode.isEmpty && newPassword.count >= 8
-        case .signIn, .signUp: email.contains("@") && password.count >= 8
+        case .signIn: email.contains("@") && password.count >= 8
+        case .signUp:
+            email.contains("@") && password.count >= 8 &&
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) != nil &&
+            phone.filter(\.isNumber).count >= 7
         case .resetRequest: email.contains("@")
         }
     }
@@ -122,8 +144,24 @@ struct SignInView: View {
                     mode = .verify
                 case .verify:
                     try await authentication.verifySignUp(email: email, code: verificationCode)
-                    authentication.saveOnboardingRole(selectedRole, for: email)
                     try await authentication.signIn(email: email, password: password)
+                    guard let years = Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+                    let profile = Authentication.OnboardingProfile(
+                        role: selectedRole,
+                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                        age: years,
+                        phone: phone.trimmingCharacters(in: .whitespacesAndNewlines),
+                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                    authentication.saveOnboardingProfile(profile, for: email)
+                    model.completeSignup(
+                        role: profile.role,
+                        name: profile.name,
+                        age: profile.age,
+                        contact: profile.phone,
+                        organization: profile.organization,
+                        sports: []
+                    )
                 case .resetRequest:
                     try await authentication.requestPasswordReset(email: email)
                     verificationCode = ""

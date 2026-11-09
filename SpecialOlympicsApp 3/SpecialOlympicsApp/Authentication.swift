@@ -8,6 +8,14 @@ final class Authentication: ObservableObject {
         let email: String
     }
 
+    struct OnboardingProfile: Codable, Equatable {
+        let role: MemberRole
+        let name: String
+        let age: Int
+        let phone: String
+        let organization: String
+    }
+
     enum AuthenticationError: LocalizedError {
         case invalidResponse
         case server(String)
@@ -67,6 +75,17 @@ final class Authentication: ObservableObject {
         onboardingRole = role
     }
 
+    func saveOnboardingProfile(_ profile: OnboardingProfile, for email: String) {
+        saveOnboardingRole(profile.role, for: email)
+        let encoded = try? JSONEncoder().encode(profile)
+        UserDefaults.standard.set(encoded, forKey: profileKey(for: email))
+    }
+
+    func savedOnboardingProfile(for email: String) -> OnboardingProfile? {
+        guard let data = UserDefaults.standard.data(forKey: profileKey(for: email)) else { return nil }
+        return try? JSONDecoder().decode(OnboardingProfile.self, from: data)
+    }
+
     func requestPasswordReset(email: String) async throws {
         try await submit("/reset_password", fields: ["email": email.trimmed])
     }
@@ -87,6 +106,10 @@ final class Authentication: ObservableObject {
 
     private func roleKey(for email: String) -> String {
         "212so.onboarding-role.\(email.trimmed.lowercased())"
+    }
+
+    private func profileKey(for email: String) -> String {
+        "212so.onboarding-profile.\(email.trimmed.lowercased())"
     }
 
     private func savedRole(for email: String) -> MemberRole? {

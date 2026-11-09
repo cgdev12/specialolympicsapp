@@ -16,7 +16,21 @@ struct SpecialOlympicsApp: App {
                 }
             }
             .environmentObject(authentication)
+            .environmentObject(model)
             .task { await authentication.restoreSession() }
+            .onChange(of: authentication.currentUser?.email, initial: true) { _, email in
+                guard let email,
+                      model.currentUser == nil,
+                      let profile = authentication.savedOnboardingProfile(for: email) else { return }
+                model.completeSignup(
+                    role: profile.role,
+                    name: profile.name,
+                    age: profile.age,
+                    contact: profile.phone,
+                    organization: profile.organization,
+                    sports: []
+                )
+            }
         }
     }
 }
