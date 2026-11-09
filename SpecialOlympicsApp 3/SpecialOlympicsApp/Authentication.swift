@@ -21,6 +21,10 @@ final class Authentication: ObservableObject {
     }
 
     @Published private(set) var currentUser: SessionUser?
+    /// The role chosen during account creation. The hosted authentication API
+    /// does not accept a role on `/register`, so the app retains it locally
+    /// for the profile-onboarding flow after email verification.
+    @Published private(set) var onboardingRole: MemberRole?
     @Published private(set) var isWorking = false
 
     private let baseURL = URL(string: "https://fastapi-template-app-entxr.ondigitalocean.app")!
@@ -35,7 +39,11 @@ final class Authentication: ObservableObject {
     }
 
     func restoreSession() async {
-        do { currentUser = try await fetchCurrentUser() }
+        do {
+            let user = try await fetchCurrentUser()
+            currentUser = user
+            onboardingRole = savedRole(for: user.email)
+        }
         catch { currentUser = nil }
     }
 
@@ -49,12 +57,40 @@ final class Authentication: ObservableObject {
 
     func signIn(email: String, password: String) async throws {
         try await submit("/login", fields: ["email": email.trimmed, "password": password, "app_name": appName])
-        currentUser = try await fetchCurrentUser()
+        let user = try await fetchCurrentUser()
+        currentUser = user
+        onboardingRole = savedRole(for: user.email)
+    }
+
+    func saveOnboardingRole(_ role: MemberRole, for email: String) {
+        UserDefaults.standard.set(role.rawValue, forKey: roleKey(for: email))
+        onboardingRole = role
+    }
+
+    func requestPasswordReset(email: String) async throws {
+        try await submit("/reset_password", fields: ["email": email.trimmed])
+    }
+
+    func confirmPasswordReset(email: String, code: String, newPassword: String) async throws {
+        try await submit("/confirm_reset_password", fields: [
+            "email": email.trimmed,
+            "code": code,
+            "new_password": newPassword
+        ])
     }
 
     func signOut() async {
         _ = try? await submit("/logout", fields: [:])
         currentUser = nil
+        onboardingRole = nil
+    }
+
+    private func roleKey(for email: String) -> String {
+        "212so.onboarding-role.\(email.trimmed.lowercased())"
+    }
+
+    private func savedRole(for email: String) -> MemberRole? {
+        UserDefaults.standard.string(forKey: roleKey(for: email)).flatMap(MemberRole.init(rawValue:))
     }
 
     private func fetchCurrentUser() async throws -> SessionUser {
