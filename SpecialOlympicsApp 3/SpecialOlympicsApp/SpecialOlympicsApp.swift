@@ -26,7 +26,10 @@ struct SpecialOlympicsApp: App {
                       model.currentUser == nil,
                       let profile = authentication.savedOnboardingProfile(for: email) else { return }
                 model.completeSignup(
-                    role: profile.role,
+                    // A portal-approved backend admin is the source of truth
+                    // for Head Coach access. A local volunteer selection must
+                    // never override that approval.
+                    role: authentication.currentUser?.isAdmin == true ? .admin : profile.role,
                     name: profile.name,
                     age: profile.age,
                     contact: profile.phone,

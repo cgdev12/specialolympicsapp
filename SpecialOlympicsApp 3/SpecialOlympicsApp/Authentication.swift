@@ -6,6 +6,10 @@ import Foundation
 final class Authentication: ObservableObject {
     struct SessionUser: Equatable {
         let email: String
+        /// The FastAPI account type for this app. The public `/me` response
+        /// only guarantees an email, so we also check the protected user list
+        /// when the signed-in person is an administrator.
+        let isAdmin: Bool
     }
 
     struct OnboardingProfile: Codable, Equatable {
@@ -142,7 +146,49 @@ final class Authentication: ObservableObject {
         try validate(response: response, data: data)
         let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let email = payload?["email"] as? String else { throw AuthenticationError.invalidResponse }
-        return SessionUser(email: email)
+        let role = (payload?["role"] as? String ?? payload?["user_type"] as? String ?? "").lowercased()
+        let isAdmin: Bool
+        if role == "admin" {
+            isAdmin = true
+        } else {
+            isAdmin = await hasAdminRole(email: email)
+        }
+        return SessionUser(email: email, isAdmin: isAdmin)
+    }
+
+    /// The current backend does not return an app role from `/me`. An admin is
+    /// allowed to read the app's user list, so use that protected route to
+    /// recognize a Head Coach account on every sign-in. Non-admins receive a
+    /// forbidden response and safely remain in their selected app role.
+    private func hasAdminRole(email: String) async -> Bool {
+        var components = URLComponents(url: baseURL.appending(path: "/admin/users"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "app_name", value: appName)]
+        guard let url = components?.url else { return false }
+
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else { return false }
+            let json = try JSONSerialization.jsonObject(with: data)
+            return roleIsAdmin(for: email, in: json)
+        } catch {
+            return false
+        }
+    }
+
+    private func roleIsAdmin(for email: String, in value: Any) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            let storedEmail = (dictionary["email"] as? String ?? dictionary["target_email"] as? String ?? "").trimmed.lowercased()
+            if storedEmail == email.trimmed.lowercased() {
+                let role = (dictionary["role"] as? String ?? dictionary["user_type"] as? String ?? dictionary["type"] as? String ?? "").lowercased()
+                if role == "admin" { return true }
+            }
+            return dictionary.values.contains { roleIsAdmin(for: email, in: $0) }
+        }
+        if let array = value as? [Any] {
+            return array.contains { roleIsAdmin(for: email, in: $0) }
+        }
+        return false
     }
 
     private func submit(_ path: String, fields: [String: String]) async throws {
