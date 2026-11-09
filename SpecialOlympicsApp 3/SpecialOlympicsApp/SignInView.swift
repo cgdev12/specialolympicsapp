@@ -83,10 +83,10 @@ struct SignInView: View {
                     Section("Your profile") {
                         TextField("Full name", text: $name)
                             .textContentType(.name)
-                        TextField("Phone number", text: $phone)
+                        TextField("Phone number", text: phoneBinding)
                             .textContentType(.telephoneNumber)
                             .keyboardType(.phonePad)
-                        TextField("Age", text: $age)
+                        TextField("Age", text: ageBinding)
                             .keyboardType(.numberPad)
                         if selectedRole == .volunteer || selectedRole == .headCoach {
                             TextField("Company or school (optional)", text: $organization)
@@ -96,7 +96,6 @@ struct SignInView: View {
                 if mode == .verify || mode == .resetConfirm {
                     Section {
                         TextField("Verification code", text: $verificationCode)
-                            .keyboardType(.numberPad)
                             .textContentType(.oneTimeCode)
                         if mode == .resetConfirm {
                             SecureField("New password", text: $newPassword)
@@ -117,6 +116,9 @@ struct SignInView: View {
                         Button("Use a different 212so account") {
                             Task { await authentication.signOut() }
                         }
+                    }
+                    if mode == .resetConfirm {
+                        Button("Send a new reset code") { resendResetCode() }
                     }
                 }
             }
@@ -163,11 +165,13 @@ struct SignInView: View {
         case .verify: !verificationCode.isEmpty
         case .resetConfirm: !verificationCode.isEmpty && newPassword.count >= 8
         case .signIn: email.contains("@") && password.count >= 8
-        case .signUp, .profileSetup:
+        case .signUp:
             email.contains("@") && password.count >= 8 &&
             !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) != nil &&
-            phone.filter(\.isNumber).count >= 7
+            validAge != nil && phone.count == 10
+        case .profileSetup:
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            validAge != nil && phone.count == 10
         case .resetRequest: email.contains("@")
         }
     }
@@ -184,24 +188,7 @@ struct SignInView: View {
                 case .verify:
                     try await authentication.verifySignUp(email: email, code: verificationCode)
                     try await authentication.signIn(email: email, password: password)
-                    guard let years = Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-                    let profile = Authentication.OnboardingProfile(
-                        role: selectedRole.memberRole,
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                        age: years,
-                        phone: phone.trimmingCharacters(in: .whitespacesAndNewlines),
-                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
-                        requestedHeadCoach: selectedRole == .headCoach
-                    )
-                    authentication.saveOnboardingProfile(profile, for: email)
-                    model.completeSignup(
-                        role: profile.role,
-                        name: profile.name,
-                        age: profile.age,
-                        contact: profile.phone,
-                        organization: profile.organization,
-                        sports: []
-                    )
+                    try saveProfile(for: email)
                 case .resetRequest:
                     try await authentication.requestPasswordReset(email: email)
                     verificationCode = ""
@@ -210,29 +197,71 @@ struct SignInView: View {
                 case .resetConfirm:
                     try await authentication.confirmPasswordReset(email: email, code: verificationCode, newPassword: newPassword)
                     password = newPassword
-                    mode = .signIn
+                    try await authentication.signIn(email: email, password: newPassword)
                 case .profileSetup:
-                    guard let email = authentication.currentUser?.email,
-                          let years = Int(age.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
-                    let profile = Authentication.OnboardingProfile(
-                        role: selectedRole.memberRole,
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                        age: years,
-                        phone: phone.trimmingCharacters(in: .whitespacesAndNewlines),
-                        organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
-                        requestedHeadCoach: selectedRole == .headCoach
-                    )
-                    authentication.saveOnboardingProfile(profile, for: email)
-                    model.completeSignup(
-                        role: profile.role,
-                        name: profile.name,
-                        age: profile.age,
-                        contact: profile.phone,
-                        organization: profile.organization,
-                        sports: []
-                    )
+                    guard let email = authentication.currentUser?.email else {
+                        throw Authentication.AuthenticationError.server("Your 212so session expired. Please sign in again.")
+                    }
+                    try saveProfile(for: email)
                 }
             } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private var phoneBinding: Binding<String> {
+        Binding(
+            get: { phone },
+            set: { phone = String($0.filter(\.isNumber).prefix(10)) }
+        )
+    }
+
+    private var ageBinding: Binding<String> {
+        Binding(
+            get: { age },
+            set: { age = String($0.filter(\.isNumber).prefix(3)) }
+        )
+    }
+
+    private var validAge: Int? {
+        guard let value = Int(age), (1...120).contains(value) else { return nil }
+        return value
+    }
+
+    private func saveProfile(for email: String) throws {
+        guard let years = validAge else {
+            throw Authentication.AuthenticationError.server("Enter an age between 1 and 120.")
+        }
+        guard phone.count == 10 else {
+            throw Authentication.AuthenticationError.server("Enter a 10-digit phone number.")
+        }
+        let profile = Authentication.OnboardingProfile(
+            role: selectedRole.memberRole,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            age: years,
+            phone: phone,
+            organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
+            requestedHeadCoach: selectedRole == .headCoach
+        )
+        authentication.saveOnboardingProfile(profile, for: email)
+        model.completeSignup(
+            role: profile.role,
+            name: profile.name,
+            age: profile.age,
+            contact: profile.phone,
+            organization: profile.organization,
+            sports: []
+        )
+    }
+
+    private func resendResetCode() {
+        Task {
+            do {
+                errorMessage = nil
+                try await authentication.requestPasswordReset(email: email)
+                verificationCode = ""
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }
