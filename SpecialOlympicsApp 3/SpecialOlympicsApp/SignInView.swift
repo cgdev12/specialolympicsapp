@@ -188,7 +188,7 @@ struct SignInView: View {
                 case .verify:
                     try await authentication.verifySignUp(email: email, code: verificationCode)
                     try await authentication.signIn(email: email, password: password)
-                    try saveProfile(for: email)
+                    try await saveProfile(for: email)
                 case .resetRequest:
                     try await authentication.requestPasswordReset(email: email)
                     verificationCode = ""
@@ -202,7 +202,7 @@ struct SignInView: View {
                     guard let email = authentication.currentUser?.email else {
                         throw Authentication.AuthenticationError.server("Your 212so session expired. Please sign in again.")
                     }
-                    try saveProfile(for: email)
+                    try await saveProfile(for: email)
                 }
             } catch { errorMessage = error.localizedDescription }
         }
@@ -210,9 +210,19 @@ struct SignInView: View {
 
     private var phoneBinding: Binding<String> {
         Binding(
-            get: { phone },
+            get: { formattedPhone(phone) },
             set: { phone = String($0.filter(\.isNumber).prefix(10)) }
         )
+    }
+
+    private func formattedPhone(_ digits: String) -> String {
+        let digits = String(digits.filter(\.isNumber).prefix(10))
+        guard !digits.isEmpty else { return "" }
+        let first = String(digits.prefix(3))
+        guard digits.count > 3 else { return first }
+        let second = String(digits.dropFirst(3).prefix(3))
+        guard digits.count > 6 else { return "\(first)-\(second)" }
+        return "\(first)-\(second)-\(digits.dropFirst(6))"
     }
 
     private var ageBinding: Binding<String> {
@@ -227,7 +237,7 @@ struct SignInView: View {
         return value
     }
 
-    private func saveProfile(for email: String) throws {
+    private func saveProfile(for email: String) async throws {
         guard let years = validAge else {
             throw Authentication.AuthenticationError.server("Enter an age between 1 and 120.")
         }
@@ -242,15 +252,8 @@ struct SignInView: View {
             organization: organization.trimmingCharacters(in: .whitespacesAndNewlines),
             requestedHeadCoach: selectedRole == .headCoach
         )
-        authentication.saveOnboardingProfile(profile, for: email)
-        model.completeSignup(
-            role: profile.role,
-            name: profile.name,
-            age: profile.age,
-            contact: profile.phone,
-            organization: profile.organization,
-            sports: []
-        )
+        let remote = try await authentication.saveOnboardingProfile(profile, for: email)
+        model.beginSharedSession(profile: remote)
     }
 
     private func resendResetCode() {

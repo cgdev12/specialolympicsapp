@@ -318,6 +318,7 @@ final class AppModel: ObservableObject {
     @Published var statLines: [StatLine]
     @Published var notices: [Notice]
     @Published var showThankYou = false
+    private var syncTask: Task<Void, Never>?
 
     init() {
         let seeded = SeedData.make()
@@ -388,9 +389,78 @@ final class AppModel: ObservableObject {
     }
 
     func signOut() {
+        syncTask?.cancel()
+        syncTask = nil
         sessionPersonID = nil
         showThankYou = false
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+    }
+
+    /// Starts the shared-data session after the existing 212so account has
+    /// authenticated. Events, updates, and RSVP results are read from the
+    /// same service on every signed-in device.
+    func beginSharedSession(profile: SharedProfile) {
+        sessionPersonID = profile.id
+        upsert(profile: profile)
+        Task { await refreshSharedData() }
+        syncTask?.cancel()
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.refreshSharedData()
+            }
+        }
+    }
+
+    func refreshSharedData() async {
+        do {
+            async let remoteEvents = SupabaseSync.shared.loadEvents()
+            async let remoteUpdates = SupabaseSync.shared.loadUpdates()
+            async let remoteResponses = SupabaseSync.shared.loadResponses()
+            async let remoteProfiles = SupabaseSync.shared.loadProfiles()
+            let (loadedEvents, loadedUpdates, loadedResponses, loadedProfiles) = try await (remoteEvents, remoteUpdates, remoteResponses, remoteProfiles)
+
+            let responseMap = Dictionary(grouping: loadedResponses, by: \.eventID)
+            events = loadedEvents.map { remote in
+                let answers = responseMap[remote.id] ?? []
+                return Event(
+                    id: remote.id,
+                    title: remote.title,
+                    date: remote.startsAt,
+                    location: remote.location,
+                    sport: remote.sport.flatMap(Sport.init(rawValue:)),
+                    reminderMinutes: remote.reminderMinutes,
+                    attendeeIDs: answers.filter { $0.response == "coming" }.map(\.userID),
+                    declinedIDs: answers.filter { $0.response == "not_coming" }.map(\.userID)
+                )
+            }
+            messages = loadedUpdates.map {
+                CommunityMessage(id: $0.id, title: $0.title, body: $0.body, date: $0.createdAt, sport: $0.sport.flatMap(Sport.init(rawValue:)))
+            }
+            for profile in loadedProfiles { upsert(profile: profile) }
+            refreshReminders()
+        } catch {
+            // Keep the most recently loaded information visible during a
+            // temporary network interruption. The next refresh retries.
+        }
+    }
+
+    private func upsert(profile: SharedProfile) {
+        let person = Person(
+            id: profile.id,
+            name: profile.displayName,
+            role: profile.memberRole,
+            age: profile.age,
+            contact: profile.phone,
+            organization: "",
+            applications: []
+        )
+        if let index = people.firstIndex(where: { $0.id == profile.id }) {
+            people[index] = person
+        } else {
+            people.append(person)
+        }
     }
 
     func apply(to sport: Sport) {
@@ -437,6 +507,10 @@ final class AppModel: ObservableObject {
         guard currentUser?.role == .admin else { return }
         events.append(event)
         refreshReminders()
+        Task {
+            try? await SupabaseSync.shared.createEvent(event)
+            await refreshSharedData()
+        }
     }
 
     func addMessage(_ message: CommunityMessage) {
@@ -448,6 +522,10 @@ final class AppModel: ObservableObject {
             postNotice(personID: person.id, title: "Update for \(audience)", body: body)
         }
         notify(title: "Update posted", body: "Sent to \(audience). \(message.title)")
+        Task {
+            try? await SupabaseSync.shared.createUpdate(message)
+            await refreshSharedData()
+        }
     }
 
     func setComing(_ coming: Bool, eventID: UUID) {
@@ -461,6 +539,10 @@ final class AppModel: ObservableObject {
             if me.role == .volunteer { showThankYou = true }
         } else {
             events[index].declinedIDs.append(me.id)
+        }
+        Task {
+            try? await SupabaseSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
+            await refreshSharedData()
         }
     }
 
