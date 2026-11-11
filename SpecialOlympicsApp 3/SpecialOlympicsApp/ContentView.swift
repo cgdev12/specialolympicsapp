@@ -517,7 +517,7 @@ struct ContentView: View {
                 header
                 if let me = model.currentUser {
                     Text("Age: \(me.age)")
-                    Text("Updates: \(me.contact)")
+                    Text("Phone: \(formattedPhone(me.contact))")
                     if !me.organization.isEmpty {
                         Text(me.organization)
                     }
@@ -626,6 +626,12 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func formattedPhone(_ value: String) -> String {
+        let digits = String(value.filter(\.isNumber).prefix(10))
+        guard digits.count == 10 else { return value }
+        return "\(digits.prefix(3))-\(digits.dropFirst(3).prefix(3))-\(digits.suffix(4))"
     }
 
     private var athleteStreak: Int {
