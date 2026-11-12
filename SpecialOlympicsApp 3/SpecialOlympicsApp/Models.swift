@@ -415,10 +415,10 @@ final class AppModel: ObservableObject {
 
     func refreshSharedData() async {
         do {
-            async let remoteEvents = SupabaseSync.shared.loadEvents()
-            async let remoteUpdates = SupabaseSync.shared.loadUpdates()
-            async let remoteResponses = SupabaseSync.shared.loadResponses()
-            async let remoteProfiles = SupabaseSync.shared.loadProfiles()
+            async let remoteEvents = SharedDataSync.shared.loadEvents()
+            async let remoteUpdates = SharedDataSync.shared.loadUpdates()
+            async let remoteResponses = SharedDataSync.shared.loadResponses()
+            async let remoteProfiles = SharedDataSync.shared.loadProfiles()
             let (loadedEvents, loadedUpdates, loadedResponses, loadedProfiles) = try await (remoteEvents, remoteUpdates, remoteResponses, remoteProfiles)
 
             let responseMap = Dictionary(grouping: loadedResponses, by: \.eventID)
@@ -508,7 +508,7 @@ final class AppModel: ObservableObject {
         events.append(event)
         refreshReminders()
         Task {
-            try? await SupabaseSync.shared.createEvent(event)
+            try? await SharedDataSync.shared.createEvent(event)
             await refreshSharedData()
         }
     }
@@ -523,7 +523,7 @@ final class AppModel: ObservableObject {
         }
         notify(title: "Update posted", body: "Sent to \(audience). \(message.title)")
         Task {
-            try? await SupabaseSync.shared.createUpdate(message)
+            try? await SharedDataSync.shared.createUpdate(message)
             await refreshSharedData()
         }
     }
@@ -541,7 +541,7 @@ final class AppModel: ObservableObject {
             events[index].declinedIDs.append(me.id)
         }
         Task {
-            try? await SupabaseSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
+            try? await SharedDataSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
             await refreshSharedData()
         }
     }

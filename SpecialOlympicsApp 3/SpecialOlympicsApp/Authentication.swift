@@ -60,8 +60,8 @@ final class Authentication: ObservableObject {
             let user = try await fetchCurrentUser()
             currentUser = user
             onboardingRole = savedRole(for: user.email)
-            try await SupabaseSync.shared.restoreSession()
-            sharedProfile = try? await SupabaseSync.shared.fetchMyProfile()
+            try await SharedDataSync.shared.restoreSession()
+            sharedProfile = try? await SharedDataSync.shared.fetchMyProfile()
         }
         catch {
             currentUser = nil
@@ -80,10 +80,10 @@ final class Authentication: ObservableObject {
     func signIn(email: String, password: String) async throws {
         try await submit("/login", fields: ["email": email.trimmed, "password": password, "app_name": appName])
         let user = try await fetchCurrentUser()
-        try await SupabaseSync.shared.signInOrCreate(email: user.email, password: password)
+        try await SharedDataSync.shared.signInOrCreate(email: user.email, password: password)
         currentUser = user
         onboardingRole = savedRole(for: user.email)
-        sharedProfile = try? await SupabaseSync.shared.fetchMyProfile()
+        sharedProfile = try? await SharedDataSync.shared.fetchMyProfile()
     }
 
     func saveOnboardingRole(_ role: MemberRole, for email: String) {
@@ -95,7 +95,7 @@ final class Authentication: ObservableObject {
         saveOnboardingRole(profile.role, for: email)
         let encoded = try? JSONEncoder().encode(profile)
         UserDefaults.standard.set(encoded, forKey: profileKey(for: email))
-        let remote = try await SupabaseSync.shared.saveProfile(
+        let remote = try await SharedDataSync.shared.saveProfile(
             name: profile.name,
             phone: profile.phone,
             age: profile.age,
@@ -133,7 +133,7 @@ final class Authentication: ObservableObject {
 
     func signOut() async {
         _ = try? await submit("/logout", fields: [:])
-        await SupabaseSync.shared.signOut()
+        await SharedDataSync.shared.signOut()
         clearSessionCookies()
         currentUser = nil
         sharedProfile = nil
@@ -164,7 +164,7 @@ final class Authentication: ObservableObject {
         try validate(response: response, data: data)
         let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let email = payload?["email"] as? String else { throw AuthenticationError.invalidResponse }
-        let role = (payload?["role"] as? String ?? payload?["user_type"] as? String ?? "").lowercased()
+        let role = (payload?["role"] as? String ?? payload?["user_type"] as? String ?? payload?["type"] as? String ?? "").lowercased()
         let isAdmin: Bool
         if role == "admin" {
             isAdmin = true
@@ -245,8 +245,7 @@ private extension String {
 
 // MARK: - Shared 212so data
 
-/// This is deliberately the *publishable* Supabase key. Row-level security on
-/// the database, rather than a secret embedded in the app, controls access.
+/// Shared 212SO data returned by the authenticated FastAPI service.
 struct SharedProfile: Codable, Equatable {
     let id: UUID
     let email: String
@@ -309,93 +308,55 @@ struct SharedResponse: Codable {
     }
 }
 
-actor SupabaseSync {
-    static let shared = SupabaseSync()
+actor SharedDataSync {
+    static let shared = SharedDataSync()
 
-    private let projectURL = URL(string: "https://oluzrysceqqcdyupuwhh.supabase.co")!
-    private let publishableKey = "sb_publishable_Ze0IA7xGHtfnnxugkTsCHA_kMdwqhjm"
-    private let sessionKey = "212so.supabase.session"
-    private var auth: AuthSession?
+    private let baseURL = URL(string: "https://fastapi-template-app-entxr.ondigitalocean.app")!
 
     struct SyncError: LocalizedError {
         let message: String
+        let statusCode: Int?
         var errorDescription: String? { message }
     }
 
-    private struct AuthSession: Codable {
-        let accessToken: String
-        let refreshToken: String
-        let user: AuthUser
-
-        enum CodingKeys: String, CodingKey {
-            case user
-            case accessToken = "access_token"
-            case refreshToken = "refresh_token"
-        }
-    }
-
-    private struct AuthUser: Codable { let id: UUID }
-
     func restoreSession() async throws {
-        guard let data = UserDefaults.standard.data(forKey: sessionKey) else { return }
-        let saved = try JSONDecoder().decode(AuthSession.self, from: data)
-        auth = try await authenticate(path: "/auth/v1/token?grant_type=refresh_token", body: ["refresh_token": saved.refreshToken])
-        if let auth { UserDefaults.standard.set(try JSONEncoder().encode(auth), forKey: sessionKey) }
+        // The FastAPI HttpOnly cookie is the single session to restore.
     }
 
     func signOut() {
-        auth = nil
-        UserDefaults.standard.removeObject(forKey: sessionKey)
+        // Authentication.signOut clears the FastAPI cookie.
     }
 
     func signInOrCreate(email: String, password: String) async throws {
-        do {
-            auth = try await authenticate(path: "/auth/v1/token?grant_type=password", body: ["email": email, "password": password])
-        } catch {
-            auth = try await authenticate(path: "/auth/v1/signup", body: ["email": email, "password": password])
-        }
-        guard let auth else { throw SyncError(message: "Could not start shared data sync.") }
-        UserDefaults.standard.set(try JSONEncoder().encode(auth), forKey: sessionKey)
+        // Authentication.signIn has already set the FastAPI cookie.
     }
 
     func fetchMyProfile() async throws -> SharedProfile? {
-        guard let auth else { return nil }
-        let items = try await rest("/rest/v1/profiles?select=*&id=eq.\(auth.user.id.uuidString)", method: "GET", body: Optional<Data>.none, as: [SharedProfile].self)
-        return items.first
+        do { return try await request("/212so/profile", method: "GET", body: nil, as: SharedProfile.self) }
+        catch let error as SyncError where error.statusCode == 404 { return nil }
     }
 
     func saveProfile(name: String, phone: String, age: Int, role: MemberRole) async throws -> SharedProfile {
-        let existing = try await fetchMyProfile()
         let roleValue = role == .athlete ? "Athlete" : "Volunteer"
-        if existing == nil {
-            return try await rpc("create_my_profile", values: [
-                "p_display_name": name,
-                "p_phone": phone,
-                "p_age": age,
-                "p_role": roleValue
-            ], as: SharedProfile.self)
-        }
-        return try await rpc("update_my_profile", values: [
-            "p_display_name": name,
-            "p_phone": phone,
-            "p_age": age
-        ], as: SharedProfile.self)
+        return try await request("/212so/profile", method: "PUT", body: jsonData([
+            "display_name": name, "phone": phone, "age": age, "role": roleValue
+        ]), as: SharedProfile.self)
     }
 
     func loadEvents() async throws -> [SharedEvent] {
-        try await rest("/rest/v1/events?select=*&order=starts_at.asc", method: "GET", body: Optional<Data>.none, as: [SharedEvent].self)
+        try await request("/212so/events", method: "GET", body: nil, as: [SharedEvent].self)
     }
 
     func loadProfiles() async throws -> [SharedProfile] {
-        try await rest("/rest/v1/profiles?select=*", method: "GET", body: Optional<Data>.none, as: [SharedProfile].self)
+        try await request("/212so/profiles", method: "GET", body: nil, as: [SharedProfile].self)
     }
 
     func loadUpdates() async throws -> [SharedUpdate] {
-        try await rest("/rest/v1/updates?select=*&order=created_at.desc", method: "GET", body: Optional<Data>.none, as: [SharedUpdate].self)
+        try await request("/212so/updates", method: "GET", body: nil, as: [SharedUpdate].self)
     }
 
     func loadResponses() async throws -> [SharedResponse] {
-        try await rest("/rest/v1/event_responses?select=*", method: "GET", body: Optional<Data>.none, as: [SharedResponse].self)
+        try await request("/212so/responses", method: "GET", body: nil, as: [SharedResponse].self)
     }
 
     func createEvent(_ event: Event) async throws {
@@ -407,7 +368,7 @@ actor SupabaseSync {
             "sport": event.sport?.rawValue ?? NSNull(),
             "reminder_minutes": event.reminderMinutes
         ]
-        _ = try await rest("/rest/v1/events", method: "POST", body: jsonData(payload), as: [SharedEvent].self)
+        _ = try await request("/212so/events", method: "POST", body: jsonData(payload), as: SharedEvent.self)
     }
 
     func createUpdate(_ update: CommunityMessage) async throws {
@@ -417,41 +378,20 @@ actor SupabaseSync {
             "body": update.body,
             "sport": update.sport?.rawValue ?? NSNull()
         ]
-        _ = try await rest("/rest/v1/updates", method: "POST", body: jsonData(payload), as: [SharedUpdate].self)
+        _ = try await request("/212so/updates", method: "POST", body: jsonData(payload), as: SharedUpdate.self)
     }
 
     func setResponse(eventID: UUID, response: String) async throws {
-        _ = try await rest("/rest/v1/event_responses?on_conflict=event_id,user_id", method: "POST", body: jsonData([
+        _ = try await request("/212so/responses", method: "PUT", body: jsonData([
             "event_id": eventID.uuidString,
             "response": response
-        ]), as: [SharedResponse].self, extraHeaders: ["Prefer": "resolution=merge-duplicates,return=representation"])
+        ]), as: SharedResponse.self)
     }
 
-    private func authenticate(path: String, body: [String: String]) async throws -> AuthSession {
-        let data = try JSONSerialization.data(withJSONObject: body)
-        var request = URLRequest(url: endpoint(path))
-        request.httpMethod = "POST"
-        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = data
-        let (responseData, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: responseData)
-        return try decoder.decode(AuthSession.self, from: responseData)
-    }
-
-    private func rpc<T: Decodable>(_ name: String, values: [String: Any], as: T.Type) async throws -> T {
-        try await rest("/rest/v1/rpc/\(name)", method: "POST", body: jsonData(values), as: T.self)
-    }
-
-    private func rest<T: Decodable>(_ path: String, method: String, body: Data?, as: T.Type, extraHeaders: [String: String] = [:]) async throws -> T {
-        guard let auth else { throw SyncError(message: "Shared data session expired. Please sign in again.") }
+    private func request<T: Decodable>(_ path: String, method: String, body: Data?, as: T.Type) async throws -> T {
         var request = URLRequest(url: endpoint(path))
         request.httpMethod = method
-        request.setValue(publishableKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(auth.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
-        extraHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         request.httpBody = body
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response, data: data)
@@ -470,17 +410,18 @@ actor SupabaseSync {
     }
 
     private func endpoint(_ path: String) -> URL {
-        URL(string: path, relativeTo: projectURL)!
+        URL(string: path, relativeTo: baseURL)!
     }
 
     private func jsonData(_ object: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: object)) ?? Data() }
 
     private func validate(_ response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
-                ?? (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["msg"] as? String
+        let statusCode = (response as? HTTPURLResponse)?.statusCode
+        guard let statusCode, (200..<300).contains(statusCode) else {
+            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+                ?? (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
                 ?? "Could not sync shared data."
-            throw SyncError(message: message)
+            throw SyncError(message: message, statusCode: statusCode)
         }
     }
 }
