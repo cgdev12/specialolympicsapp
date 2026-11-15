@@ -62,6 +62,14 @@ struct ContentView: View {
         .sheet(isPresented: thankYouBinding) {
             ThankYouLetter(name: model.currentUser?.name ?? name)
         }
+        .alert("Could Not Sync", isPresented: Binding(
+            get: { model.syncError != nil },
+            set: { if !$0 { model.syncError = nil } }
+        )) {
+            Button("OK", role: .cancel) { model.syncError = nil }
+        } message: {
+            Text(model.syncError ?? "Please try again.")
+        }
     }
 
     private var thankYouBinding: Binding<Bool> {

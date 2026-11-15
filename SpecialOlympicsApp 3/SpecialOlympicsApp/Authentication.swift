@@ -312,6 +312,18 @@ actor SharedDataSync {
     static let shared = SharedDataSync()
 
     private let baseURL = URL(string: "https://fastapi-template-app-entxr.ondigitalocean.app")!
+    private let session: URLSession
+
+    init() {
+        let configuration = URLSessionConfiguration.default
+        // Use the same persistent cookie store as Authentication. Keeping a
+        // separate ephemeral session here was enough for the UI to appear
+        // signed in while its shared-data requests were anonymous.
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieStorage = .shared
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        session = URLSession(configuration: configuration)
+    }
 
     struct SyncError: LocalizedError {
         let message: String
@@ -393,7 +405,9 @@ actor SharedDataSync {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
-        let (data, response) = try await URLSession.shared.data(for: request)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(T.self, from: data)
     }

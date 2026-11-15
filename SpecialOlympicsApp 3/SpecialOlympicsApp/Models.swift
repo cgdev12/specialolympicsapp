@@ -318,6 +318,9 @@ final class AppModel: ObservableObject {
     @Published var statLines: [StatLine]
     @Published var notices: [Notice]
     @Published var showThankYou = false
+    /// A server write must never fail invisibly. This is presented by the app
+    /// shell and explains why a post was not shared with other devices.
+    @Published var syncError: String?
     private var syncTask: Task<Void, Never>?
 
     init() {
@@ -406,7 +409,10 @@ final class AppModel: ObservableObject {
         syncTask?.cancel()
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                // Foreground devices converge quickly without relying on a
+                // local cache, so a coach's post reaches other open phones in
+                // roughly two seconds.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { return }
                 await self?.refreshSharedData()
             }
@@ -442,7 +448,8 @@ final class AppModel: ObservableObject {
             refreshReminders()
         } catch {
             // Keep the most recently loaded information visible during a
-            // temporary network interruption. The next refresh retries.
+            // temporary network interruption. Write errors are handled at
+            // their call site so a failed post is never mistaken for success.
         }
     }
 
@@ -505,26 +512,31 @@ final class AppModel: ObservableObject {
 
     func addEvent(_ event: Event) {
         guard currentUser?.role == .admin else { return }
-        events.append(event)
-        refreshReminders()
         Task {
-            try? await SharedDataSync.shared.createEvent(event)
-            await refreshSharedData()
+            do {
+                try await SharedDataSync.shared.createEvent(event)
+                await refreshSharedData()
+            } catch {
+                syncError = "The event was not posted. \(error.localizedDescription)"
+            }
         }
     }
 
     func addMessage(_ message: CommunityMessage) {
         guard currentUser?.role == .admin else { return }
-        messages.insert(message, at: 0)
-        let audience = message.sport?.rawValue ?? "everyone"
-        let body = "\(message.title): \(message.body)"
-        for person in people where person.role == .athlete && canSeeMessage(message, person: person) {
-            postNotice(personID: person.id, title: "Update for \(audience)", body: body)
-        }
-        notify(title: "Update posted", body: "Sent to \(audience). \(message.title)")
         Task {
-            try? await SharedDataSync.shared.createUpdate(message)
-            await refreshSharedData()
+            do {
+                try await SharedDataSync.shared.createUpdate(message)
+                await refreshSharedData()
+                let audience = message.sport?.rawValue ?? "everyone"
+                let body = "\(message.title): \(message.body)"
+                for person in people where person.role == .athlete && canSeeMessage(message, person: person) {
+                    postNotice(personID: person.id, title: "Update for \(audience)", body: body)
+                }
+                notify(title: "Update posted", body: "Sent to \(audience). \(message.title)")
+            } catch {
+                syncError = "The update was not posted. \(error.localizedDescription)"
+            }
         }
     }
 
@@ -532,17 +544,14 @@ final class AppModel: ObservableObject {
         guard let me = currentUser else { return }
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
         if me.role == .athlete && !canSeeEvent(events[index], person: me) { return }
-        events[index].attendeeIDs.removeAll { $0 == me.id }
-        events[index].declinedIDs.removeAll { $0 == me.id }
-        if coming {
-            events[index].attendeeIDs.append(me.id)
-            if me.role == .volunteer { showThankYou = true }
-        } else {
-            events[index].declinedIDs.append(me.id)
-        }
         Task {
-            try? await SharedDataSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
-            await refreshSharedData()
+            do {
+                try await SharedDataSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
+                if coming && me.role == .volunteer { showThankYou = true }
+                await refreshSharedData()
+            } catch {
+                syncError = "Your RSVP was not saved. \(error.localizedDescription)"
+            }
         }
     }
 
