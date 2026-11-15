@@ -409,6 +409,18 @@ actor SharedDataSync {
     }
 
     func createEvent(_ event: Event) async throws {
+        _ = try await request("/212so/events", method: "POST", body: eventPayload(event), as: SharedEvent.self)
+    }
+
+    func updateEvent(_ event: Event) async throws {
+        _ = try await request("/212so/events/\(event.id.uuidString)", method: "PUT", body: eventPayload(event), as: SharedEvent.self)
+    }
+
+    func deleteEvent(id: UUID) async throws {
+        try await requestVoid("/212so/events/\(id.uuidString)", method: "DELETE")
+    }
+
+    private func eventPayload(_ event: Event) -> Data {
         let payload: [String: Any] = [
             "id": event.id.uuidString,
             "title": event.title,
@@ -417,17 +429,29 @@ actor SharedDataSync {
             "sport": event.sport?.rawValue ?? NSNull(),
             "reminder_minutes": event.reminderMinutes
         ]
-        _ = try await request("/212so/events", method: "POST", body: jsonData(payload), as: SharedEvent.self)
+        return jsonData(payload)
     }
 
     func createUpdate(_ update: CommunityMessage) async throws {
+        _ = try await request("/212so/updates", method: "POST", body: updatePayload(update), as: SharedUpdate.self)
+    }
+
+    func updateUpdate(_ update: CommunityMessage) async throws {
+        _ = try await request("/212so/updates/\(update.id.uuidString)", method: "PUT", body: updatePayload(update), as: SharedUpdate.self)
+    }
+
+    func deleteUpdate(id: UUID) async throws {
+        try await requestVoid("/212so/updates/\(id.uuidString)", method: "DELETE")
+    }
+
+    private func updatePayload(_ update: CommunityMessage) -> Data {
         let payload: [String: Any] = [
             "id": update.id.uuidString,
             "title": update.title,
             "body": update.body,
             "sport": update.sport?.rawValue ?? NSNull()
         ]
-        _ = try await request("/212so/updates", method: "POST", body: jsonData(payload), as: SharedUpdate.self)
+        return jsonData(payload)
     }
 
     func setResponse(eventID: UUID, response: String) async throws {
@@ -463,6 +487,18 @@ actor SharedDataSync {
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(T.self, from: data)
+    }
+
+    private func requestVoid(_ path: String, method: String) async throws {
+        var request = URLRequest(url: endpoint(path))
+        request.httpMethod = method
+        if let token = sessionToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
     }
 
     private var decoder: JSONDecoder {

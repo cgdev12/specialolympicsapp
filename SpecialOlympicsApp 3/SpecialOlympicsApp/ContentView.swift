@@ -29,6 +29,8 @@ struct ContentView: View {
     @State private var statsEvent: Event?
     @State private var showNewEvent = false
     @State private var showNewMessage = false
+    @State private var editingMessage: CommunityMessage?
+    @State private var deletingMessage: CommunityMessage?
 
     init(initialRole: MemberRole? = nil) {
         _role = State(initialValue: initialRole)
@@ -59,6 +61,9 @@ struct ContentView: View {
         .sheet(isPresented: $showNewMessage) {
             NewMessageView(group: updateGroup) { model.addMessage($0) }
         }
+        .sheet(item: $editingMessage) { message in
+            EditMessageView(message: message) { model.updateMessage($0) }
+        }
         .sheet(isPresented: thankYouBinding) {
             ThankYouLetter(name: model.currentUser?.name ?? name)
         }
@@ -69,6 +74,16 @@ struct ContentView: View {
             Button("OK", role: .cancel) { model.syncError = nil }
         } message: {
             Text(model.syncError ?? "Please try again.")
+        }
+        .confirmationDialog("Delete this update?", isPresented: Binding(
+            get: { deletingMessage != nil }, set: { if !$0 { deletingMessage = nil } }
+        ), titleVisibility: .visible) {
+            Button("Delete Update", role: .destructive) {
+                if let message = deletingMessage { model.deleteMessage(message) }
+                deletingMessage = nil
+            }
+        } message: {
+            Text("This cannot be undone.")
         }
     }
 
@@ -496,12 +511,23 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(posts) { message in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(message.title).font(.headline)
-                                Text(message.body)
-                                Text(message.date, style: .date)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(message.title).font(.headline)
+                                    Text(message.body)
+                                    Text(message.date, style: .date)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if model.currentUser?.role == .admin {
+                                    Menu {
+                                        Button("Edit", systemImage: "pencil") { editingMessage = message }
+                                        Button("Delete", systemImage: "trash", role: .destructive) { deletingMessage = message }
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle")
+                                    }
+                                }
                             }
                             .padding(.vertical, 4)
                         }
@@ -750,6 +776,8 @@ struct EventDetail: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showStats = false
+    @State private var showEditor = false
+    @State private var confirmDelete = false
 
     private var event: Event? { model.events.first { $0.id == eventID } }
 
@@ -841,6 +869,26 @@ struct EventDetail: View {
             }
             .sheet(isPresented: $showStats) {
                 StatEntrySheet(eventID: eventID)
+            }
+            .sheet(isPresented: $showEditor) {
+                if let event { EditEventView(event: event) { model.updateEvent($0) } }
+            }
+            .confirmationDialog("Delete this event?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete Event", role: .destructive) {
+                    if let event { model.deleteEvent(event); dismiss() }
+                }
+            } message: {
+                Text("The event and its RSVPs will be removed for everyone.")
+            }
+            .toolbar {
+                if model.currentUser?.role == .admin, event != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button("Edit event", systemImage: "pencil") { showEditor = true }
+                            Button("Delete event", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                    }
+                }
             }
         }
     }
@@ -1070,6 +1118,90 @@ struct NewMessageView: View {
                             date: Date(),
                             sport: group.sport
                         ))
+                        dismiss()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+/// Coach-only editor. The event ID and attendee list remain unchanged, while
+/// the server updates the shared event for every signed-in device.
+struct EditEventView: View {
+    @Environment(\.dismiss) private var dismiss
+    let event: Event
+    let onSave: (Event) -> Void
+    @State private var title: String
+    @State private var location: String
+    @State private var date: Date
+    @State private var reminder: ReminderLead
+
+    init(event: Event, onSave: @escaping (Event) -> Void) {
+        self.event = event
+        self.onSave = onSave
+        _title = State(initialValue: event.title)
+        _location = State(initialValue: event.location)
+        _date = State(initialValue: event.date)
+        _reminder = State(initialValue: ReminderLead.allCases.min(by: { abs($0.rawValue - event.reminderMinutes) < abs($1.rawValue - event.reminderMinutes) }) ?? .hour)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Event title", text: $title)
+                DatePicker("Date and time", selection: $date)
+                TextField("Location", text: $location)
+                Picker("Reminder", selection: $reminder) {
+                    ForEach(ReminderLead.allCases) { lead in Text(lead.label).tag(lead) }
+                }
+            }
+            .navigationTitle("Edit event")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(Event(id: event.id, title: title.trimmingCharacters(in: .whitespacesAndNewlines), date: date,
+                                     location: location.trimmingCharacters(in: .whitespacesAndNewlines), sport: event.sport,
+                                     reminderMinutes: reminder.rawValue, attendeeIDs: event.attendeeIDs, declinedIDs: event.declinedIDs))
+                        dismiss()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+/// Coach-only editor for an existing shared update.
+struct EditMessageView: View {
+    @Environment(\.dismiss) private var dismiss
+    let message: CommunityMessage
+    let onSave: (CommunityMessage) -> Void
+    @State private var title: String
+    @State private var bodyText: String
+
+    init(message: CommunityMessage, onSave: @escaping (CommunityMessage) -> Void) {
+        self.message = message
+        self.onSave = onSave
+        _title = State(initialValue: message.title)
+        _bodyText = State(initialValue: message.body)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Update title", text: $title)
+                TextEditor(text: $bodyText).frame(minHeight: 130)
+            }
+            .navigationTitle("Edit update")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(CommunityMessage(id: message.id, title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                body: bodyText.trimmingCharacters(in: .whitespacesAndNewlines), date: message.date, sport: message.sport))
                         dismiss()
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

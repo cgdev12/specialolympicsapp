@@ -579,6 +579,54 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateEvent(_ event: Event) {
+        guard currentUser?.role == .admin else { return }
+        Task {
+            do {
+                try await SharedDataSync.shared.updateEvent(event)
+                await refreshSharedData()
+            } catch {
+                syncError = "The event was not updated. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func deleteEvent(_ event: Event) {
+        guard currentUser?.role == .admin else { return }
+        Task {
+            do {
+                try await SharedDataSync.shared.deleteEvent(id: event.id)
+                await refreshSharedData()
+            } catch {
+                syncError = "The event was not deleted. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func updateMessage(_ message: CommunityMessage) {
+        guard currentUser?.role == .admin else { return }
+        Task {
+            do {
+                try await SharedDataSync.shared.updateUpdate(message)
+                await refreshSharedData()
+            } catch {
+                syncError = "The update was not edited. \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func deleteMessage(_ message: CommunityMessage) {
+        guard currentUser?.role == .admin else { return }
+        Task {
+            do {
+                try await SharedDataSync.shared.deleteUpdate(id: message.id)
+                await refreshSharedData()
+            } catch {
+                syncError = "The update was not deleted. \(error.localizedDescription)"
+            }
+        }
+    }
+
     func setComing(_ coming: Bool, eventID: UUID) {
         guard let me = currentUser else { return }
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
