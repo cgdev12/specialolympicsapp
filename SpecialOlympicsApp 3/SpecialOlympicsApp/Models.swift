@@ -631,12 +631,28 @@ final class AppModel: ObservableObject {
         guard let me = currentUser else { return }
         guard let index = events.firstIndex(where: { $0.id == eventID }) else { return }
         if me.role == .athlete && !canSeeEvent(events[index], person: me) { return }
+        // Change the visible RSVP straight away. Waiting for a full refresh of
+        // every shared feed made the buttons look unresponsive even when the
+        // server had accepted the answer.
+        let previousEvent = events[index]
+        events[index].attendeeIDs.removeAll { $0 == me.id }
+        events[index].declinedIDs.removeAll { $0 == me.id }
+        if coming {
+            events[index].attendeeIDs.append(me.id)
+        } else {
+            events[index].declinedIDs.append(me.id)
+        }
         Task {
             do {
                 try await SharedDataSync.shared.setResponse(eventID: eventID, response: coming ? "coming" : "not_coming")
                 if coming && me.role == .volunteer { showThankYou = true }
                 await refreshSharedData()
             } catch {
+                // Do not leave a successful-looking answer onscreen if the
+                // server rejected it; restore the last confirmed state.
+                if let latestIndex = events.firstIndex(where: { $0.id == eventID }) {
+                    events[latestIndex] = previousEvent
+                }
                 syncError = "Your RSVP was not saved. \(error.localizedDescription)"
             }
         }
@@ -751,6 +767,11 @@ final class AppModel: ObservableObject {
 
     func people(ids: [UUID], role: MemberRole) -> [Person] {
         people(ids: ids).filter { $0.role == role }
+    }
+
+    /// Head coaches are part of the volunteer side of event attendance.
+    func volunteersAndAdmins(ids: [UUID]) -> [Person] {
+        people(ids: ids).filter { $0.role == .volunteer || $0.role == .admin }
     }
 
     func postNotice(personID: UUID, title: String, body: String) {

@@ -800,7 +800,7 @@ struct EventDetail: View {
                         }
                         Section("Attendance") {
                             HStack {
-                                StatBadge(count: model.people(ids: event.attendeeIDs, role: .volunteer).count, label: "Volunteers", icon: "heart.fill")
+                                StatBadge(count: model.volunteersAndAdmins(ids: event.attendeeIDs).count, label: "Volunteers", icon: "heart.fill")
                                 StatBadge(count: model.people(ids: event.attendeeIDs, role: .athlete).count, label: "Athletes", icon: "figure.run")
                                 StatBadge(count: event.declinedIDs.count, label: "Can’t make it", icon: "xmark.circle.fill")
                             }
@@ -814,9 +814,9 @@ struct EventDetail: View {
                             )
                             attendanceSection(
                                 title: "Volunteers coming",
-                                people: model.people(ids: event.attendeeIDs, role: .volunteer),
+                                people: model.volunteersAndAdmins(ids: event.attendeeIDs),
                                 icon: "heart.fill",
-                                empty: "No volunteers yet"
+                                empty: "No volunteers or coaches yet"
                             )
                         }
                         attendanceSection(
