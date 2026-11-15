@@ -78,7 +78,12 @@ final class Authentication: ObservableObject {
     }
 
     func signIn(email: String, password: String) async throws {
-        try await submit("/login", fields: ["email": email.trimmed, "password": password, "app_name": appName])
+        let loginData = try await submit("/login", fields: ["email": email.trimmed, "password": password, "app_name": appName])
+        let loginPayload = try JSONSerialization.jsonObject(with: loginData) as? [String: Any]
+        guard let token = loginPayload?["session_token"] as? String, !token.isEmpty else {
+            throw AuthenticationError.invalidResponse
+        }
+        await SharedDataSync.shared.setSessionToken(token)
         let user = try await fetchCurrentUser()
         try await SharedDataSync.shared.signInOrCreate(email: user.email, password: password)
         currentUser = user
@@ -160,7 +165,11 @@ final class Authentication: ObservableObject {
     }
 
     private func fetchCurrentUser() async throws -> SessionUser {
-        let (data, response) = try await session.data(from: baseURL.appending(path: "/me"))
+        var request = URLRequest(url: baseURL.appending(path: "/me"))
+        if let token = await SharedDataSync.shared.sessionToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
         let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let email = payload?["email"] as? String else { throw AuthenticationError.invalidResponse }
@@ -209,15 +218,19 @@ final class Authentication: ObservableObject {
         return false
     }
 
-    private func submit(_ path: String, fields: [String: String]) async throws {
+    private func submit(_ path: String, fields: [String: String]) async throws -> Data {
         isWorking = true
         defer { isWorking = false }
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = formBody(fields)
+        if let token = await SharedDataSync.shared.sessionToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data)
+        return data
     }
 
     private func formBody(_ fields: [String: String]) -> Data? {
@@ -324,6 +337,7 @@ actor SharedDataSync {
 
     private let baseURL = URL(string: "https://fastapi-template-app-entxr.ondigitalocean.app")!
     private let session: URLSession
+    private let sessionTokenKey = "212so.fastapi.session-token"
 
     init() {
         let configuration = URLSessionConfiguration.default
@@ -347,11 +361,19 @@ actor SharedDataSync {
     }
 
     func signOut() {
-        // Authentication.signOut clears the FastAPI cookie.
+        UserDefaults.standard.removeObject(forKey: sessionTokenKey)
     }
 
     func signInOrCreate(email: String, password: String) async throws {
         // Authentication.signIn has already set the FastAPI cookie.
+    }
+
+    func setSessionToken(_ token: String) {
+        UserDefaults.standard.set(token, forKey: sessionTokenKey)
+    }
+
+    func sessionToken() -> String? {
+        UserDefaults.standard.string(forKey: sessionTokenKey)
     }
 
     func fetchMyProfile() async throws -> SharedProfile? {
@@ -432,6 +454,9 @@ actor SharedDataSync {
         var request = URLRequest(url: endpoint(path))
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = sessionToken() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = body
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
