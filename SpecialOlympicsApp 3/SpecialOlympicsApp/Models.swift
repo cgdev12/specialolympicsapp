@@ -420,36 +420,57 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSharedData() async {
-        do {
-            async let remoteEvents = SharedDataSync.shared.loadEvents()
-            async let remoteUpdates = SharedDataSync.shared.loadUpdates()
-            async let remoteResponses = SharedDataSync.shared.loadResponses()
-            async let remoteProfiles = SharedDataSync.shared.loadProfiles()
-            let (loadedEvents, loadedUpdates, loadedResponses, loadedProfiles) = try await (remoteEvents, remoteUpdates, remoteResponses, remoteProfiles)
+        async let remoteEvents = SharedDataSync.shared.loadEvents()
+        async let remoteUpdates = SharedDataSync.shared.loadUpdates()
+        async let remoteResponses = SharedDataSync.shared.loadResponses()
+        async let remoteProfiles = SharedDataSync.shared.loadProfiles()
+        async let remoteApplications = SharedDataSync.shared.loadTeamApplications()
 
+        var failures: [String] = []
+        var loadedResponses: [SharedResponse] = []
+        var loadedApplications: [SharedTeamApplication] = []
+
+        do { loadedResponses = try await remoteResponses }
+        catch { failures.append("attendance") }
+        do { loadedApplications = try await remoteApplications }
+        catch { failures.append("team approvals") }
+        do {
+            let loadedEvents = try await remoteEvents
             let responseMap = Dictionary(grouping: loadedResponses, by: \.eventID)
             events = loadedEvents.map { remote in
                 let answers = responseMap[remote.id] ?? []
-                return Event(
-                    id: remote.id,
-                    title: remote.title,
-                    date: remote.startsAt,
-                    location: remote.location,
-                    sport: remote.sport.flatMap(Sport.init(rawValue:)),
-                    reminderMinutes: remote.reminderMinutes,
-                    attendeeIDs: answers.filter { $0.response == "coming" }.map(\.userID),
-                    declinedIDs: answers.filter { $0.response == "not_coming" }.map(\.userID)
-                )
+                return Event(id: remote.id, title: remote.title, date: remote.startsAt,
+                             location: remote.location, sport: remote.sport.flatMap(Sport.init(rawValue:)),
+                             reminderMinutes: remote.reminderMinutes,
+                             attendeeIDs: answers.filter { $0.response == "coming" }.map(\.userID),
+                             declinedIDs: answers.filter { $0.response == "not_coming" }.map(\.userID))
             }
+        } catch { failures.append("events") }
+        do {
+            let loadedUpdates = try await remoteUpdates
             messages = loadedUpdates.map {
                 CommunityMessage(id: $0.id, title: $0.title, body: $0.body, date: $0.createdAt, sport: $0.sport.flatMap(Sport.init(rawValue:)))
             }
-            for profile in loadedProfiles { upsert(profile: profile) }
+        } catch { failures.append("updates") }
+        do {
+            let loadedProfiles = try await remoteProfiles
+            let applicationsByUser = Dictionary(grouping: loadedApplications, by: \.userID)
+            people = loadedProfiles.map { profile in
+                Person(id: profile.id, name: profile.displayName, role: profile.memberRole,
+                       age: profile.age, contact: profile.phone, organization: "",
+                       applications: (applicationsByUser[profile.id] ?? []).compactMap { item in
+                           guard let sport = Sport(rawValue: item.sport),
+                                 let status = applicationStatus(from: item.status) else { return nil }
+                           return TeamApplication(id: UUID(), sport: sport, status: status)
+                       })
+            }
+        } catch { failures.append("profiles") }
+
+        if failures.isEmpty {
+            syncError = nil
             refreshReminders()
-        } catch {
-            // Keep the most recently loaded information visible during a
-            // temporary network interruption. Write errors are handled at
-            // their call site so a failed post is never mistaken for success.
+        } else {
+            syncError = "Could not refresh \(failures.joined(separator: ", ")). Pull down or try again shortly."
         }
     }
 
@@ -470,20 +491,38 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func applicationStatus(from serverValue: String) -> ApplicationStatus? {
+        switch serverValue.lowercased() {
+        case "pending": return .pending
+        case "approved": return .approved
+        case "declined": return .declined
+        default: return nil
+        }
+    }
+
     func apply(to sport: Sport) {
         guard let me = currentUser, me.role == .athlete else { return }
         guard let index = people.firstIndex(where: { $0.id == me.id }) else { return }
         guard !people[index].applications.contains(where: { $0.sport == sport }) else { return }
-        people[index].applications.append(TeamApplication(id: UUID(), sport: sport, status: .pending))
+        Task {
+            do {
+                try await SharedDataSync.shared.saveTeamApplication(sport: sport)
+                await refreshSharedData()
+            } catch {
+                syncError = "Your team request was not saved. \(error.localizedDescription)"
+            }
+        }
     }
 
     func setApplication(personID: UUID, sport: Sport, status: ApplicationStatus) {
         guard currentUser?.role == .admin else { return }
-        guard let index = people.firstIndex(where: { $0.id == personID }) else { return }
-        guard let appIndex = people[index].applications.firstIndex(where: { $0.sport == sport }) else { return }
-        people[index].applications[appIndex].status = status
-        if personID == sessionPersonID {
-            refreshReminders()
+        Task {
+            do {
+                try await SharedDataSync.shared.saveTeamApplication(userID: personID, sport: sport, status: status)
+                await refreshSharedData()
+            } catch {
+                syncError = "The team decision was not saved. \(error.localizedDescription)"
+            }
         }
     }
 

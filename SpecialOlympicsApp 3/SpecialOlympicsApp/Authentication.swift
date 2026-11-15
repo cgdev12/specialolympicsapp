@@ -308,6 +308,17 @@ struct SharedResponse: Codable {
     }
 }
 
+struct SharedTeamApplication: Codable {
+    let userID: UUID
+    let sport: String
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case sport, status
+        case userID = "user_id"
+    }
+}
+
 actor SharedDataSync {
     static let shared = SharedDataSync()
 
@@ -371,6 +382,10 @@ actor SharedDataSync {
         try await request("/212so/responses", method: "GET", body: nil, as: [SharedResponse].self)
     }
 
+    func loadTeamApplications() async throws -> [SharedTeamApplication] {
+        try await request("/212so/team-applications", method: "GET", body: nil, as: [SharedTeamApplication].self)
+    }
+
     func createEvent(_ event: Event) async throws {
         let payload: [String: Any] = [
             "id": event.id.uuidString,
@@ -398,6 +413,19 @@ actor SharedDataSync {
             "event_id": eventID.uuidString,
             "response": response
         ]), as: SharedResponse.self)
+    }
+
+    func saveTeamApplication(userID: UUID? = nil, sport: Sport, status: ApplicationStatus? = nil) async throws {
+        var payload: [String: Any] = ["sport": sport.rawValue]
+        if let userID { payload["user_id"] = userID.uuidString }
+        if let status {
+            payload["status"] = switch status {
+            case .pending: "pending"
+            case .approved: "approved"
+            case .declined: "declined"
+            }
+        }
+        _ = try await request("/212so/team-applications", method: "PUT", body: jsonData(payload), as: SharedTeamApplication.self)
     }
 
     private func request<T: Decodable>(_ path: String, method: String, body: Data?, as: T.Type) async throws -> T {
