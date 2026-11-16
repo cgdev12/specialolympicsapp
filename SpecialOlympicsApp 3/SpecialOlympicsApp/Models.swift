@@ -403,6 +403,13 @@ final class AppModel: ObservableObject {
     /// authenticated. Events, updates, and RSVP results are read from the
     /// same service on every signed-in device.
     func beginSharedSession(profile: SharedProfile) {
+        // Demo data must never be treated as a real roster after sign-in.
+        // In particular, seed athlete IDs do not exist in FastAPI and caused
+        // coach approvals to fail with "Athlete profile not found".
+        events = []
+        messages = []
+        people = []
+        notices = []
         sessionPersonID = profile.id
         upsert(profile: profile)
         Task { await refreshSharedData() }
