@@ -31,6 +31,7 @@ struct ContentView: View {
     @State private var showNewMessage = false
     @State private var editingMessage: CommunityMessage?
     @State private var deletingMessage: CommunityMessage?
+    @State private var athleteSearch = ""
 
     init(initialRole: MemberRole? = nil) {
         _role = State(initialValue: initialRole)
@@ -559,11 +560,11 @@ struct ContentView: View {
             }
             if model.currentUser?.role == .admin {
                 Section("Approve athletes for each team") {
-                    if model.applicationRows.isEmpty {
+                    if model.pendingApplicationRows.isEmpty {
                         Text("No applications yet.")
                             .foregroundStyle(.secondary)
                     }
-                    ForEach(model.applicationRows) { row in
+                    ForEach(model.pendingApplicationRows) { row in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(row.name).font(.headline)
                             Text("\(row.sport.rawValue) · \(row.status.rawValue)")
@@ -574,21 +575,43 @@ struct ContentView: View {
                                     model.setApplication(personID: row.personID, sport: row.sport, status: .approved)
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(row.status == .approved)
                                 Button("Decline") {
                                     model.setApplication(personID: row.personID, sport: row.sport, status: .declined)
                                 }
-                                .disabled(row.status == .declined)
                             }
                         }
                         .padding(.vertical, 4)
                     }
                 }
-                Section("Athlete graphs") {
+                Section("Groups") {
+                    ForEach(Sport.allCases) { sport in
+                        DisclosureGroup(sport.rawValue) {
+                            let members = model.groupMembers(for: sport)
+                            if members.isEmpty { Text("No members yet.").foregroundStyle(.secondary) }
+                            ForEach(members) { person in
+                                HStack {
+                                    VStack(alignment: .leading) { Text(person.name); Text(person.role.rawValue).font(.caption).foregroundStyle(.secondary) }
+                                    Spacer()
+                                    if person.role == .athlete, model.status(for: sport, personID: person.id) == .approved {
+                                        Button("Remove", role: .destructive) { model.setApplication(personID: person.id, sport: sport, status: .declined) }
+                                            .font(.caption)
+                                    }
+                                }
+                            }
+                            Menu("Add athlete") {
+                                ForEach(model.athletes.filter { model.status(for: sport, personID: $0.id) != .approved }) { athlete in
+                                    Button(athlete.name) { model.setApplication(personID: athlete.id, sport: sport, status: .approved) }
+                                }
+                            }
+                        }
+                    }
+                }
+                Section("Athletes") {
                     Text("Only you can enter or change stats, and you can do it at any time. Athletes can view the graph and cannot change it.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    ForEach(model.athletes) { athlete in
+                    TextField("Search athletes", text: $athleteSearch)
+                    ForEach(model.athletes.filter { athleteSearch.isEmpty || $0.name.localizedCaseInsensitiveContains(athleteSearch) }) { athlete in
                         NavigationLink(athlete.name) {
                             AthleteStatsPage(athleteID: athlete.id)
                         }
@@ -936,23 +959,23 @@ struct RSVPChoice: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            option(title: "Yes", icon: "checkmark.circle.fill", selected: response == .coming) {
+            option(title: "Yes", icon: "checkmark", selected: response == .coming, color: .green) {
                 choose(true)
             }
-            option(title: "No", icon: "xmark.circle.fill", selected: response == .notComing) {
+            option(title: "No", icon: "xmark", selected: response == .notComing, color: .red) {
                 choose(false)
             }
         }
     }
 
-    private func option(title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func option(title: String, icon: String, selected: Bool, color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: icon)
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
-                .background(selected ? Color.blue : Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-                .foregroundStyle(selected ? Color.white : Color.blue)
+                .background(selected ? color : color.opacity(0.13), in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(selected ? Color.white : color)
         }
         .buttonStyle(.plain)
     }

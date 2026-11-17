@@ -332,6 +332,21 @@ struct SharedTeamApplication: Codable {
     }
 }
 
+struct SharedStatLine: Codable {
+    let id: UUID
+    let athleteID: UUID
+    let eventID: UUID
+    let group: String
+    let date: Date
+    let values: [String: Int]
+
+    enum CodingKeys: String, CodingKey {
+        case id, group, date, values
+        case athleteID = "athlete_id"
+        case eventID = "event_id"
+    }
+}
+
 actor SharedDataSync {
     static let shared = SharedDataSync()
 
@@ -406,6 +421,19 @@ actor SharedDataSync {
 
     func loadTeamApplications() async throws -> [SharedTeamApplication] {
         try await request("/212so/team-applications", method: "GET", body: nil, as: [SharedTeamApplication].self)
+    }
+
+    func loadStats() async throws -> [SharedStatLine] {
+        try await request("/212so/stats", method: "GET", body: nil, as: [SharedStatLine].self)
+    }
+
+    func saveStat(_ line: StatLine) async throws {
+        let payload: [String: Any] = [
+            "id": line.id.uuidString, "athlete_id": line.athleteID.uuidString,
+            "event_id": line.eventID.uuidString, "group": line.group.rawValue,
+            "date": ISO8601DateFormatter().string(from: line.date), "values": line.values
+        ]
+        _ = try await request("/212so/stats", method: "PUT", body: jsonData(payload), as: SharedStatLine.self)
     }
 
     func createEvent(_ event: Event) async throws {

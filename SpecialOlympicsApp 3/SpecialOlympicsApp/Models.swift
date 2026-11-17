@@ -361,6 +361,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Only pending requests belong in the approval inbox. Approved or
+    /// declined rows are roster history, not choices a coach must repeat.
+    var pendingApplicationRows: [ApplicationRow] {
+        applicationRows.filter { $0.status == .pending }
+    }
+
+    func groupMembers(for sport: Sport) -> [Person] {
+        let athletesOnTeam = approvedAthletes(for: sport)
+        let staff = people.filter { $0.role == .volunteer || $0.role == .admin }
+        return athletesOnTeam + staff
+    }
+
     func completeSignup(role: MemberRole, name: String, age: Int, contact: String, organization: String, sports: Set<Sport>) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedContact = contact.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -409,6 +421,7 @@ final class AppModel: ObservableObject {
         events = []
         messages = []
         people = []
+        statLines = []
         notices = []
         sessionPersonID = profile.id
         upsert(profile: profile)
@@ -432,15 +445,19 @@ final class AppModel: ObservableObject {
         async let remoteResponses = SharedDataSync.shared.loadResponses()
         async let remoteProfiles = SharedDataSync.shared.loadProfiles()
         async let remoteApplications = SharedDataSync.shared.loadTeamApplications()
+        async let remoteStats = SharedDataSync.shared.loadStats()
 
         var failures: [String] = []
         var loadedResponses: [SharedResponse] = []
         var loadedApplications: [SharedTeamApplication] = []
+        var loadedStats: [SharedStatLine] = []
 
         do { loadedResponses = try await remoteResponses }
         catch { failures.append("attendance") }
         do { loadedApplications = try await remoteApplications }
         catch { failures.append("team approvals") }
+        do { loadedStats = try await remoteStats }
+        catch { failures.append("stats") }
         do {
             let loadedEvents = try await remoteEvents
             let responseMap = Dictionary(grouping: loadedResponses, by: \.eventID)
@@ -472,6 +489,11 @@ final class AppModel: ObservableObject {
                        })
             }
         } catch { failures.append("profiles") }
+        statLines = loadedStats.compactMap { remote in
+            guard let group = EventGroup(rawValue: remote.group) else { return nil }
+            return StatLine(id: remote.id, athleteID: remote.athleteID, eventID: remote.eventID,
+                            group: group, date: remote.date, values: remote.values)
+        }
 
         if failures.isEmpty {
             syncError = nil
@@ -719,12 +741,17 @@ final class AppModel: ObservableObject {
         case .success(let ok): clean = ok
         case .failure(let error): return error.message
         }
+        let savedLine: StatLine
         if let index = statLines.firstIndex(where: { $0.eventID == eventID && $0.athleteID == athleteID }) {
             statLines[index].values = clean
             statLines[index].group = group
+            savedLine = statLines[index]
         } else {
-            statLines.append(StatLine(id: UUID(), athleteID: athleteID, eventID: eventID, group: group, date: event.date, values: clean))
+            let line = StatLine(id: UUID(), athleteID: athleteID, eventID: eventID, group: group, date: event.date, values: clean)
+            statLines.append(line)
+            savedLine = line
         }
+        Task { do { try await SharedDataSync.shared.saveStat(savedLine) } catch { syncError = "The stat sheet was not saved. \(error.localizedDescription)" } }
         let athleteName = people.first { $0.id == athleteID }?.name ?? "Athlete"
         let summary = group.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
         let body = "\(athleteName), \(event.title): \(summary)"
@@ -749,6 +776,7 @@ final class AppModel: ObservableObject {
         statLines[index].date = date
         statLines[index].values = clean
         let line = statLines[index]
+        Task { do { try await SharedDataSync.shared.saveStat(line) } catch { syncError = "The stat sheet was not saved. \(error.localizedDescription)" } }
         let athleteName = people.first { $0.id == line.athleteID }?.name ?? "Athlete"
         let summary = group.kinds.map { "\($0.label) \(clean[$0.key] ?? 0)" }.joined(separator: ", ")
         let body = "\(athleteName), \(eventTitle(line.eventID)) on \(date.formatted(date: .abbreviated, time: .omitted)): \(summary)"

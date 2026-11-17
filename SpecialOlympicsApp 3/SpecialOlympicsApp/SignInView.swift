@@ -67,7 +67,7 @@ struct SignInView: View {
                     }
                 }
                 if mode == .signUp || mode == .profileSetup {
-                    Section("How will you use 212so?") {
+                    Section("How will you use Special Olympics?") {
                         Picker("Role", selection: $selectedRole) {
                             ForEach(SignupRole.allCases) { role in
                                 Label(role.rawValue, systemImage: role.icon).tag(role)
@@ -113,7 +113,7 @@ struct SignInView: View {
                     } else if mode != .profileSetup {
                         Button("Back to sign in") { mode = .signIn; errorMessage = nil }
                     } else {
-                        Button("Use a different 212so account") {
+                        Button("Use a different Special Olympics account") {
                             Task { await authentication.signOut() }
                         }
                     }
@@ -122,7 +122,7 @@ struct SignInView: View {
                     }
                 }
             }
-            .navigationTitle("212so")
+            .navigationTitle("Special Olympics")
             .overlay { if authentication.isWorking { ProgressView() } }
         }
     }
@@ -151,12 +151,12 @@ struct SignInView: View {
 
     private var subtitle: String {
         switch mode {
-        case .signIn: "Sign in to 212so to continue."
+        case .signIn: "Sign in to Special Olympics to continue."
         case .signUp: "Choose your role and enter your phone number once. There is no second sign-in."
         case .verify: "Enter the verification code sent to \(email)."
         case .resetRequest: "We’ll email a code to reset your password."
         case .resetConfirm: "Enter the reset code sent to \(email)."
-        case .profileSetup: "Your 212so account is already verified. Update the role and phone number linked to this app."
+        case .profileSetup: "Your Special Olympics account is already verified. Update the role and phone number linked to this app."
         }
     }
 
@@ -200,7 +200,7 @@ struct SignInView: View {
                     try await authentication.signIn(email: email, password: newPassword)
                 case .profileSetup:
                     guard let email = authentication.currentUser?.email else {
-                        throw Authentication.AuthenticationError.server("Your 212so session expired. Please sign in again.")
+                        throw Authentication.AuthenticationError.server("Your Special Olympics session expired. Please sign in again.")
                     }
                     try await saveProfile(for: email)
                 }
