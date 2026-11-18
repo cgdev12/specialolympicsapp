@@ -322,6 +322,8 @@ final class AppModel: ObservableObject {
     /// shell and explains why a post was not shared with other devices.
     @Published var syncError: String?
     private var syncTask: Task<Void, Never>?
+    private struct PendingRSVP { let requestID: UUID; let response: EventResponse }
+    private var pendingRSVPs: [UUID: PendingRSVP] = [:]
 
     init() {
         let seeded = SeedData.make()
@@ -463,11 +465,25 @@ final class AppModel: ObservableObject {
             let responseMap = Dictionary(grouping: loadedResponses, by: \.eventID)
             events = loadedEvents.map { remote in
                 let answers = responseMap[remote.id] ?? []
-                return Event(id: remote.id, title: remote.title, date: remote.startsAt,
+                var event = Event(id: remote.id, title: remote.title, date: remote.startsAt,
                              location: remote.location, sport: remote.sport.flatMap(Sport.init(rawValue:)),
                              reminderMinutes: remote.reminderMinutes,
                              attendeeIDs: answers.filter { $0.response == "coming" }.map(\.userID),
                              declinedIDs: answers.filter { $0.response == "not_coming" }.map(\.userID))
+                // Do not let a polling response that began before the tap
+                // overwrite the choice the person just made. Clear the local
+                // pending flag only after the server echoes that same answer.
+                if let pending = pendingRSVPs[event.id], let me = sessionPersonID {
+                    let confirmed = pending.response == .coming ? event.attendeeIDs.contains(me) : event.declinedIDs.contains(me)
+                    if confirmed {
+                        pendingRSVPs.removeValue(forKey: event.id)
+                    } else {
+                        event.attendeeIDs.removeAll { $0 == me }
+                        event.declinedIDs.removeAll { $0 == me }
+                        if pending.response == .coming { event.attendeeIDs.append(me) } else { event.declinedIDs.append(me) }
+                    }
+                }
+                return event
             }
         } catch { failures.append("events") }
         do {
@@ -664,6 +680,9 @@ final class AppModel: ObservableObject {
         // every shared feed made the buttons look unresponsive even when the
         // server had accepted the answer.
         let previousEvent = events[index]
+        let requestID = UUID()
+        let intendedResponse: EventResponse = coming ? .coming : .notComing
+        pendingRSVPs[eventID] = PendingRSVP(requestID: requestID, response: intendedResponse)
         events[index].attendeeIDs.removeAll { $0 == me.id }
         events[index].declinedIDs.removeAll { $0 == me.id }
         if coming {
@@ -679,7 +698,8 @@ final class AppModel: ObservableObject {
             } catch {
                 // Do not leave a successful-looking answer onscreen if the
                 // server rejected it; restore the last confirmed state.
-                if let latestIndex = events.firstIndex(where: { $0.id == eventID }) {
+                if pendingRSVPs[eventID]?.requestID == requestID, let latestIndex = events.firstIndex(where: { $0.id == eventID }) {
+                    pendingRSVPs.removeValue(forKey: eventID)
                     events[latestIndex] = previousEvent
                 }
                 syncError = "Your RSVP was not saved. \(error.localizedDescription)"
