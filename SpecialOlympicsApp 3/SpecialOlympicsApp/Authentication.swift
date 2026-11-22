@@ -308,6 +308,16 @@ struct SharedUpdate: Codable {
         case id, title, body, sport, audience
         case createdAt = "created_at"
     }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        body = try values.decode(String.self, forKey: .body)
+        sport = try values.decodeIfPresent(String.self, forKey: .sport)
+        audience = try values.decodeIfPresent(String.self, forKey: .audience) ?? "all"
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 struct SharedResponse: Codable {
