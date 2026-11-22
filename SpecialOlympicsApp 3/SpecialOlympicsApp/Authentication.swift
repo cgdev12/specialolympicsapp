@@ -301,10 +301,11 @@ struct SharedUpdate: Codable {
     let title: String
     let body: String
     let sport: String?
+    let audience: String
     let createdAt: Date
 
     enum CodingKeys: String, CodingKey {
-        case id, title, body, sport
+        case id, title, body, sport, audience
         case createdAt = "created_at"
     }
 }
@@ -472,12 +473,23 @@ actor SharedDataSync {
         try await requestVoid("/212so/updates/\(id.uuidString)", method: "DELETE")
     }
 
+    func sendEmail(recipientIDs: [UUID], subject: String, body: String) async throws -> Int {
+        struct EmailResult: Codable { let sent: Int }
+        let payload: [String: Any] = [
+            "recipient_ids": recipientIDs.map(\.uuidString),
+            "subject": subject,
+            "body": body
+        ]
+        return try await request("/212so/send-email", method: "POST", body: jsonData(payload), as: EmailResult.self).sent
+    }
+
     private func updatePayload(_ update: CommunityMessage) -> Data {
         let payload: [String: Any] = [
             "id": update.id.uuidString,
             "title": update.title,
             "body": update.body,
             "sport": update.sport?.rawValue ?? NSNull()
+            , "audience": update.audience.rawValue
         ]
         return jsonData(payload)
     }

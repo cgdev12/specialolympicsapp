@@ -62,9 +62,9 @@ enum Sport: String, CaseIterable, Identifiable, Hashable {
             ]
         case .bowling:
             return [
-                StatKind(key: "score", label: "Score", min: 0, max: 300),
-                StatKind(key: "strikes", label: "Strikes", min: 0, max: 12),
-                StatKind(key: "spares", label: "Spares", min: 0, max: 10)
+                StatKind(key: "game_1", label: "Game 1", min: 0, max: 300),
+                StatKind(key: "game_2", label: "Game 2", min: 0, max: 300),
+                StatKind(key: "total", label: "Total", min: 0, max: 600)
             ]
         }
     }
@@ -78,7 +78,7 @@ enum Sport: String, CaseIterable, Identifiable, Hashable {
         case .golf:
             "Golf scorecard: total strokes, putts, and pars. A lower score means fewer strokes."
         case .bowling:
-            "Bowling score sheet: game score out of 300, plus strikes and spares."
+            "Bowling score sheet: Game 1, Game 2, and Total only."
         }
     }
 }
@@ -111,6 +111,7 @@ struct Person: Identifiable, Hashable {
     var contact: String
     var organization: String
     var applications: [TeamApplication]
+    var email: String = ""
 }
 
 struct Event: Identifiable, Hashable {
@@ -132,12 +133,43 @@ enum EventResponse: Equatable {
     case notComing
 }
 
+enum UpdateAudience: String, CaseIterable, Identifiable, Codable {
+    case everyone = "all"
+    case coaches = "coaches"
+    case coachesAndVolunteers = "coaches_volunteers"
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .everyone: "Everyone"
+        case .coaches: "Head Coaches only"
+        case .coachesAndVolunteers: "Head Coaches and Volunteers"
+        }
+    }
+
+    func includes(_ role: MemberRole) -> Bool {
+        switch self {
+        case .everyone: true
+        case .coaches: role == .admin
+        case .coachesAndVolunteers: role == .admin || role == .volunteer
+        }
+    }
+}
+
 struct CommunityMessage: Identifiable, Hashable {
     let id: UUID
     var title: String
     var body: String
     var date: Date
     var sport: Sport?
+    var audience: UpdateAudience = .everyone
+}
+
+struct BowlingImportRow: Hashable {
+    let athleteName: String
+    let game1: Int
+    let game2: Int
+    let total: Int
 }
 
 struct StatLine: Identifiable, Hashable {
@@ -489,7 +521,9 @@ final class AppModel: ObservableObject {
         do {
             let loadedUpdates = try await remoteUpdates
             messages = loadedUpdates.map {
-                CommunityMessage(id: $0.id, title: $0.title, body: $0.body, date: $0.createdAt, sport: $0.sport.flatMap(Sport.init(rawValue:)))
+                CommunityMessage(id: $0.id, title: $0.title, body: $0.body, date: $0.createdAt,
+                                 sport: $0.sport.flatMap(Sport.init(rawValue:)),
+                                 audience: UpdateAudience(rawValue: $0.audience) ?? .everyone)
             }
         } catch { failures.append("updates") }
         do {
@@ -502,7 +536,7 @@ final class AppModel: ObservableObject {
                            guard let sport = Sport(rawValue: item.sport),
                                  let status = applicationStatus(from: item.status) else { return nil }
                            return TeamApplication(id: UUID(), sport: sport, status: status)
-                       })
+                       }, email: profile.email)
             }
         } catch { failures.append("profiles") }
         statLines = loadedStats.compactMap { remote in
@@ -527,7 +561,7 @@ final class AppModel: ObservableObject {
             age: profile.age,
             contact: profile.phone,
             organization: "",
-            applications: []
+            applications: [], email: profile.email
         )
         if let index = people.firstIndex(where: { $0.id == profile.id }) {
             people[index] = person
@@ -582,6 +616,7 @@ final class AppModel: ObservableObject {
     }
 
     func canSeeMessage(_ message: CommunityMessage, person: Person) -> Bool {
+        guard message.audience.includes(person.role) else { return false }
         if person.role != .athlete { return true }
         guard let sport = message.sport else { return true }
         return status(for: sport, personID: person.id) == .approved
@@ -612,9 +647,9 @@ final class AppModel: ObservableObject {
             do {
                 try await SharedDataSync.shared.createUpdate(message)
                 await refreshSharedData()
-                let audience = message.sport?.rawValue ?? "everyone"
+                let audience = message.audience.label
                 let body = "\(message.title): \(message.body)"
-                for person in people where person.role == .athlete && canSeeMessage(message, person: person) {
+                for person in people where canSeeMessage(message, person: person) {
                     postNotice(personID: person.id, title: "Update for \(audience)", body: body)
                 }
                 notify(title: "Update posted", body: "Sent to \(audience). \(message.title)")
@@ -732,6 +767,48 @@ final class AppModel: ObservableObject {
     /// Only the admin / head coach can add or change stat sheets.
     var canEditStats: Bool {
         currentUser?.role == .admin
+    }
+
+    func importBowlingScores(eventID: UUID, rows: [BowlingImportRow]) -> String? {
+        guard canEditStats else { return "Only a Head Coach can import scores." }
+        guard let event = events.first(where: { $0.id == eventID }), event.group == .bowling else {
+            return "Choose a Bowling event before importing scores."
+        }
+        var imported: [StatLine] = []
+        for row in rows {
+            guard row.total == row.game1 + row.game2 else {
+                return "\(row.athleteName): Total must equal Game 1 plus Game 2."
+            }
+            guard let athlete = eligibleAthletes(for: .bowling).first(where: { $0.name.caseInsensitiveCompare(row.athleteName.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame }) else {
+                return "\(row.athleteName) is not an approved Bowling athlete."
+            }
+            let values = ["game_1": row.game1, "game_2": row.game2, "total": row.total]
+            guard case .success = cleanValues(values, group: .bowling) else {
+                return "\(row.athleteName) has an invalid Bowling score."
+            }
+            let line = StatLine(id: statLine(eventID: eventID, athleteID: athlete.id)?.id ?? UUID(), athleteID: athlete.id,
+                                eventID: eventID, group: .bowling, date: event.date, values: values)
+            if let index = statLines.firstIndex(where: { $0.eventID == eventID && $0.athleteID == athlete.id }) { statLines[index] = line }
+            else { statLines.append(line) }
+            imported.append(line)
+        }
+        Task {
+            do {
+                for line in imported { try await SharedDataSync.shared.saveStat(line) }
+                await refreshSharedData()
+            } catch { syncError = "The Bowling scores were not saved. \(error.localizedDescription)" }
+        }
+        return nil
+    }
+
+    func emailMembers(_ people: [Person], subject: String, body: String) {
+        guard currentUser?.role == .admin else { return }
+        Task {
+            do {
+                let sent = try await SharedDataSync.shared.sendEmail(recipientIDs: people.map(\.id), subject: subject, body: body)
+                notify(title: "Email sent", body: "Sent to \(sent) member\(sent == 1 ? "" : "s").")
+            } catch { syncError = "The email was not sent. \(error.localizedDescription)" }
+        }
     }
 
     private func cleanValues(_ values: [String: Int], group: EventGroup) -> Result<[String: Int], StatError> {

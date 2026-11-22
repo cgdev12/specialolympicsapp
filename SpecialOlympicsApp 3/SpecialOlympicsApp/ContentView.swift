@@ -1,6 +1,7 @@
 import SwiftUI
 import Charts
 import UserNotifications
+import UniformTypeIdentifiers
 
 private enum JoinStep {
     case details
@@ -31,6 +32,7 @@ struct ContentView: View {
     @State private var showNewMessage = false
     @State private var editingMessage: CommunityMessage?
     @State private var deletingMessage: CommunityMessage?
+    @State private var showEmailMembers = false
     @State private var athleteSearch = ""
 
     init(initialRole: MemberRole? = nil) {
@@ -65,6 +67,7 @@ struct ContentView: View {
         .sheet(item: $editingMessage) { message in
             EditMessageView(message: message) { model.updateMessage($0) }
         }
+        .sheet(isPresented: $showEmailMembers) { EmailMembersView() }
         .sheet(isPresented: thankYouBinding) {
             ThankYouLetter(name: model.currentUser?.name ?? name)
         }
@@ -504,7 +507,7 @@ struct ContentView: View {
                     Section { Text(reason).foregroundStyle(.secondary) }
                 } else {
                     let posts = model.messages
-                        .filter { $0.sport == updateGroup.sport }
+                        .filter { $0.sport == updateGroup.sport && ($0.audience.includes(model.currentUser?.role ?? .athlete)) }
                         .sorted { $0.date > $1.date }
                     Section(updateGroup == .main ? "Main updates" : "\(updateGroup.rawValue) updates") {
                         if posts.isEmpty {
@@ -541,6 +544,9 @@ struct ContentView: View {
             if model.currentUser?.role == .admin {
                 ToolbarItem(placement: .automatic) {
                     Button { showNewMessage = true } label: { Label("Post update", systemImage: "square.and.pencil") }
+                }
+                ToolbarItem(placement: .automatic) {
+                    Button { showEmailMembers = true } label: { Label("Email members", systemImage: "envelope") }
                 }
             }
         }
@@ -1115,12 +1121,18 @@ struct NewMessageView: View {
     let onCreate: (CommunityMessage) -> Void
     @State private var title = ""
     @State private var bodyText = ""
+    @State private var audience: UpdateAudience = .everyone
 
     var body: some View {
         NavigationStack {
             Form {
                 TextField("Update title", text: $title)
                 TextEditor(text: $bodyText).frame(minHeight: 130)
+                Picker("Who can see this?", selection: $audience) {
+                    ForEach(UpdateAudience.allCases) { audience in
+                        Text(audience.label).tag(audience)
+                    }
+                }
                 Section {
                     Text(group == .main
                          ? "This update goes to everyone."
@@ -1139,11 +1151,63 @@ struct NewMessageView: View {
                             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                             body: bodyText.trimmingCharacters(in: .whitespacesAndNewlines),
                             date: Date(),
-                            sport: group.sport
+                            sport: group.sport,
+                            audience: audience
                         ))
                         dismiss()
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+struct EmailMembersView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected: Set<UUID> = []
+    @State private var subject = ""
+    @State private var bodyText = ""
+
+    private var recipients: [Person] { model.people.filter { !$0.email.isEmpty } }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Recipients") {
+                    Button(selected.count == recipients.count ? "Clear selection" : "Select all") {
+                        selected = selected.count == recipients.count ? [] : Set(recipients.map(\.id))
+                    }
+                    ForEach(recipients) { person in
+                        Toggle(isOn: Binding(get: { selected.contains(person.id) }, set: { checked in
+                            if checked { selected.insert(person.id) } else { selected.remove(person.id) }
+                        })) {
+                            VStack(alignment: .leading) {
+                                Text(person.name)
+                                Text(person.role.rawValue).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Section("Email") {
+                    TextField("Subject", text: $subject)
+                    TextEditor(text: $bodyText).frame(minHeight: 150)
+                }
+                Section {
+                    Text("Only Head Coaches can send email. Each selected member receives an individual message.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Email members")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send") {
+                        model.emailMembers(recipients.filter { selected.contains($0.id) }, subject: subject, body: bodyText)
+                        dismiss()
+                    }
+                    .disabled(selected.isEmpty || subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -1243,6 +1307,8 @@ struct StatEntrySheet: View {
     @State private var letterWarning: String?
     @State private var attempted = false
     @State private var showConfirm = false
+    @State private var importingBowling = false
+    @State private var importMessage: String?
     @FocusState private var focused: Bool
 
     private var event: Event? { model.events.first { $0.id == eventID } }
@@ -1262,6 +1328,11 @@ struct StatEntrySheet: View {
             .navigationTitle("Stat sheet")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                if event?.group == .bowling {
+                    ToolbarItem(placement: .automatic) {
+                        Button("Import Excel CSV") { importingBowling = true }
+                    }
+                }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focused = false }
@@ -1269,6 +1340,15 @@ struct StatEntrySheet: View {
             }
         }
         .onAppear { prepare() }
+        .fileImporter(isPresented: $importingBowling, allowedContentTypes: [.commaSeparatedText, .plainText]) { result in
+            switch result {
+            case .success(let url): importBowlingCSV(url)
+            case .failure(let error): importMessage = "The score file could not be opened. \(error.localizedDescription)"
+            }
+        }
+        .alert("Bowling import", isPresented: Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })) {
+            Button("OK", role: .cancel) { importMessage = nil }
+        } message: { Text(importMessage ?? "") }
     }
 
     private func form(event: Event, group: EventGroup) -> some View {
@@ -1396,6 +1476,48 @@ struct StatEntrySheet: View {
             result[kind.key] = number
         }
         return result
+    }
+
+    private func importBowlingCSV(_ url: URL) {
+        guard let event else { return }
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let rows = try BowlingScoreCSV.parse(text)
+            if let error = model.importBowlingScores(eventID: event.id, rows: rows) { importMessage = error }
+            else { importMessage = "Imported \(rows.count) Bowling score\(rows.count == 1 ? "" : "s")." }
+        } catch { importMessage = error.localizedDescription }
+    }
+}
+
+enum BowlingScoreCSV {
+    static func parse(_ text: String) throws -> [BowlingImportRow] {
+        let rows = text.split(whereSeparator: \.isNewline).map { $0.split(separator: ",", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } }
+        guard let header = rows.first else { throw ImportError("The score file is empty.") }
+        let names = header.map { $0.lowercased().replacingOccurrences(of: "_", with: " ") }
+        guard let athlete = names.firstIndex(where: { $0 == "athlete" || $0 == "athlete name" }),
+              let game1 = names.firstIndex(where: { $0 == "game 1" || $0 == "game1" }),
+              let game2 = names.firstIndex(where: { $0 == "game 2" || $0 == "game2" }),
+              let total = names.firstIndex(where: { $0 == "total" }) else {
+            throw ImportError("Use these Excel column headers: Athlete, Game 1, Game 2, Total.")
+        }
+        let needed = max(athlete, game1, game2, total)
+        var imported: [BowlingImportRow] = []
+        for (offset, row) in rows.dropFirst().enumerated() where !row.allSatisfy({ $0.isEmpty }) {
+            guard row.count > needed, let one = Int(row[game1]), let two = Int(row[game2]), let sum = Int(row[total]), !row[athlete].isEmpty else {
+                throw ImportError("Row \(offset + 2) needs an athlete name and numeric Game 1, Game 2, and Total.")
+            }
+            imported.append(BowlingImportRow(athleteName: row[athlete], game1: one, game2: two, total: sum))
+        }
+        guard !imported.isEmpty else { throw ImportError("There are no Bowling scores to import.") }
+        return imported
+    }
+
+    struct ImportError: LocalizedError {
+        let message: String
+        init(_ message: String) { self.message = message }
+        var errorDescription: String? { message }
     }
 }
 
